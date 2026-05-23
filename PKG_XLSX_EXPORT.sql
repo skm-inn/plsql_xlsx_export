@@ -20,7 +20,7 @@
 -- -----------------------------------------------------------------------------
 -- STEP 1: Package Specification
 -- -----------------------------------------------------------------------------
-CREATE OR REPLACE PACKAGE PKG_XLSX_EXPORT AS
+CREATE OR REPLACE PACKAGE PKG_XLSX_EXPORT AUTHID CURRENT_USER AS
 
   /**
    * Reset the sheet registry. Call before starting a new workbook.
@@ -118,12 +118,13 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
   END;
 
   FUNCTION crc32(p_data IN BLOB) RETURN NUMBER IS
-    v_crc    NUMBER := 4294967295; -- 0xFFFFFFFF
+    v_crc    NUMBER := 4294967295;
     v_len    NUMBER;
     v_chunk  RAW(32767);
     v_pos    NUMBER := 1;
     v_byte   NUMBER;
-    v_idx    PLS_INTEGER;
+    v_idx    NUMBER;
+    v_low    NUMBER;
   BEGIN
     IF g_crc_tab.COUNT = 0 THEN init_crc_table; END IF;
     v_len := DBMS_LOB.GETLENGTH(p_data);
@@ -131,23 +132,20 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
       v_chunk := DBMS_LOB.SUBSTR(p_data, LEAST(32767, v_len - v_pos + 1), v_pos);
       FOR i IN 1..UTL_RAW.LENGTH(v_chunk) LOOP
         v_byte := TO_NUMBER(RAWTOHEX(UTL_RAW.SUBSTR(v_chunk, i, 1)), 'XX');
-        v_idx  := MOD(MOD(v_crc, 256) + v_byte, 256);
-        -- Use BITAND for XOR simulation (no native XOR in PL/SQL for large nums)
-        v_crc  := g_crc_tab(v_idx) +
-                  TRUNC(v_crc / 256);   -- logical right shift 8
-        -- Keep within UINT32
+        v_low  := MOD(v_crc, 256);
+        -- XOR: a XOR b = a + b - 2 * BITAND(a, b)
+        v_idx  := v_low + v_byte - 2 * BITAND(v_low, v_byte);
+        v_crc  := g_crc_tab(v_idx) + TRUNC(v_crc / 256)
+                - 2 * BITAND(g_crc_tab(v_idx), TRUNC(v_crc / 256));
         v_crc  := MOD(v_crc, 4294967296);
       END LOOP;
       v_pos := v_pos + 32767;
     END LOOP;
-    RETURN MOD(4294967295 - v_crc + 1 + 4294967296, 4294967296);
+    -- Finalize: XOR with 0xFFFFFFFF = 4294967295 - crc (since crc < 2^32)
+    RETURN 4294967295 - v_crc;
   END;
 
   -- ---- Little-endian helpers ----
-  FUNCTION int2le2(p_n IN NUMBER) RETURN RAW IS
-  BEGIN
-    RETURN UTL_RAW.SUBSTR(UTL_RAW.CAST_FROM_NUMBER(p_n), 1, 2); -- placeholder
-  END;
 
   /** Convert integer to N-byte little-endian RAW */
   FUNCTION to_le(p_val IN NUMBER, p_bytes IN PLS_INTEGER) RETURN RAW IS
@@ -376,7 +374,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
         || '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
         -- Number formats
         || '<numFmts count="1">'
-        || '<numFmt numFmtId="164" formatCode="YYYY-MM-DD HH:MM:SS"/>'
+        || '<numFmt numFmtId="164" formatCode="YYYY-MM-DD HH:mm:SS"/>'
         || '</numFmts>'
         -- Fonts: 0=normal, 1=bold header
         || '<fonts count="2">'
@@ -480,7 +478,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
     v_desc_tab    DBMS_SQL.DESC_TAB;
     v_type        PLS_INTEGER;
     v_xml         CLOB;
-    v_row_xml     VARCHAR2(32767);
+    v_row_clob    CLOB;
     v_cell_ref    VARCHAR2(10);
     v_row_num     PLS_INTEGER := 1;
 
@@ -509,6 +507,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
 
   BEGIN
     DBMS_LOB.CREATETEMPORARY(v_xml, TRUE);
+    DBMS_LOB.CREATETEMPORARY(v_row_clob, TRUE);
 
     v_cursor := DBMS_SQL.OPEN_CURSOR;
     BEGIN
@@ -523,7 +522,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
           WHEN 1 THEN DBMS_SQL.DEFINE_COLUMN(v_cursor, i, v_varchar_val(1), 32767);
           WHEN 2 THEN DBMS_SQL.DEFINE_COLUMN(v_cursor, i, v_number_val(1));
           WHEN 3 THEN DBMS_SQL.DEFINE_COLUMN(v_cursor, i, v_date_val(1));
-          WHEN 4 THEN DBMS_SQL.DEFINE_COLUMN_CHAR(v_cursor, i, v_varchar_val(1), 32767);
+          WHEN 4 THEN DBMS_SQL.DEFINE_COLUMN(v_cursor, i, v_clob_val(1));
           ELSE        DBMS_SQL.DEFINE_COLUMN(v_cursor, i, v_varchar_val(1), 32767);
         END CASE;
       END LOOP;
@@ -535,26 +534,28 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
         TO_CLOB('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
              || '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
              || ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-             || '<sheetView tabSelected="1" workbookViewId="0"><selection activeCell="A1"/></sheetView>'
+             || '<sheetViews><sheetView tabSelected="1" workbookViewId="0"><selection activeCell="A1"/></sheetView></sheetViews>'
              || '<sheetData>'));
 
       -- Header row (style 1 = bold blue)
-      v_row_xml := '<row r="1">';
+      DBMS_LOB.TRIM(v_row_clob, 0);
+      DBMS_LOB.APPEND(v_row_clob, TO_CLOB('<row r="1">'));
       FOR i IN 1..v_col_cnt LOOP
         v_cell_ref := col_letter(i) || '1';
-        v_row_xml  := v_row_xml
-                   || '<c r="' || v_cell_ref || '" t="s" s="1">'
-                   || '<v>' || get_ss_idx(SUBSTR(v_desc_tab(i).col_name, 1, 255)) || '</v>'
-                   || '</c>';
+        DBMS_LOB.APPEND(v_row_clob,
+          TO_CLOB('<c r="' || v_cell_ref || '" t="s" s="1">'
+               || '<v>' || get_ss_idx(SUBSTR(v_desc_tab(i).col_name, 1, 32767)) || '</v>'
+               || '</c>'));
       END LOOP;
-      v_row_xml := v_row_xml || '</row>';
-      DBMS_LOB.APPEND(v_xml, TO_CLOB(v_row_xml));
+      DBMS_LOB.APPEND(v_row_clob, TO_CLOB('</row>'));
+      DBMS_LOB.APPEND(v_xml, v_row_clob);
 
       v_row_num := 2;
 
       -- Data rows
       WHILE DBMS_SQL.FETCH_ROWS(v_cursor) > 0 LOOP
-        v_row_xml := '<row r="' || v_row_num || '">';
+        DBMS_LOB.TRIM(v_row_clob, 0);
+        DBMS_LOB.APPEND(v_row_clob, TO_CLOB('<row r="' || v_row_num || '">'));
 
         FOR i IN 1..v_col_cnt LOOP
           v_cell_ref := col_letter(i) || v_row_num;
@@ -562,46 +563,48 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
             WHEN 1 THEN
               DBMS_SQL.COLUMN_VALUE(v_cursor, i, v_varchar_val(i));
               IF v_varchar_val(i) IS NOT NULL THEN
-                v_row_xml := v_row_xml
-                          || '<c r="' || v_cell_ref || '" t="s">'
-                          || '<v>' || get_ss_idx(xml_escape(SUBSTR(v_varchar_val(i),1,255))) || '</v>'
-                          || '</c>';
+                DBMS_LOB.APPEND(v_row_clob,
+                  TO_CLOB('<c r="' || v_cell_ref || '" t="s">'
+                       || '<v>' || get_ss_idx(SUBSTR(v_varchar_val(i), 1, 32767)) || '</v>'
+                       || '</c>'));
               END IF;
             WHEN 2 THEN
               DBMS_SQL.COLUMN_VALUE(v_cursor, i, v_number_val(i));
               IF v_number_val(i) IS NOT NULL THEN
-                v_row_xml := v_row_xml
-                          || '<c r="' || v_cell_ref || '">'
-                          || '<v>' || TO_CHAR(v_number_val(i)) || '</v>'
-                          || '</c>';
+                DBMS_LOB.APPEND(v_row_clob,
+                  TO_CLOB('<c r="' || v_cell_ref || '">'
+                       || '<v>' || TO_CHAR(v_number_val(i)) || '</v>'
+                       || '</c>'));
               END IF;
             WHEN 3 THEN
               DBMS_SQL.COLUMN_VALUE(v_cursor, i, v_date_val(i));
               IF v_date_val(i) IS NOT NULL THEN
-                -- Excel date as string in date style (s="2")
-                v_row_xml := v_row_xml
-                          || '<c r="' || v_cell_ref || '" t="s" s="2">'
-                          || '<v>' || get_ss_idx(TO_CHAR(v_date_val(i), 'YYYY-MM-DD HH24:MI:SS')) || '</v>'
-                          || '</c>';
+                -- Excel date serial: days since 1899-12-30 (accounting for Excel's 1900 leap year bug)
+                DECLARE
+                  v_serial NUMBER;
+                BEGIN
+                  v_serial := (v_date_val(i) - DATE '1899-12-30');
+                  DBMS_LOB.APPEND(v_row_clob,
+                    TO_CLOB('<c r="' || v_cell_ref || '" s="2">'
+                         || '<v>' || TO_CHAR(v_serial, 'FM99999999990.9999999999') || '</v>'
+                         || '</c>'));
+                END;
               END IF;
             WHEN 4 THEN
-              DBMS_SQL.COLUMN_VALUE_CHAR(v_cursor, i, v_varchar_val(i));
-              IF v_varchar_val(i) IS NOT NULL THEN
-                v_row_xml := v_row_xml
-                          || '<c r="' || v_cell_ref || '" t="s">'
-                          || '<v>' || get_ss_idx(xml_escape(SUBSTR(TRIM(v_varchar_val(i)),1,255))) || '</v>'
-                          || '</c>';
+              DBMS_SQL.COLUMN_VALUE(v_cursor, i, v_clob_val(i));
+              IF v_clob_val(i) IS NOT NULL AND DBMS_LOB.GETLENGTH(v_clob_val(i)) > 0 THEN
+                DBMS_LOB.APPEND(v_row_clob,
+                  TO_CLOB('<c r="' || v_cell_ref || '" t="s">'
+                       || '<v>' || get_ss_idx(SUBSTR(v_clob_val(i), 1, 32767)) || '</v>'
+                       || '</c>'));
               END IF;
             ELSE NULL;
           END CASE;
         END LOOP;
 
-        v_row_xml := v_row_xml || '</row>';
-        DBMS_LOB.APPEND(v_xml, TO_CLOB(v_row_xml));
+        DBMS_LOB.APPEND(v_row_clob, TO_CLOB('</row>'));
+        DBMS_LOB.APPEND(v_xml, v_row_clob);
         v_row_num := v_row_num + 1;
-
-        -- Flush for large result sets (> 10k rows yield partial LOB writes)
-        IF MOD(v_row_num, 500) = 0 THEN NULL; END IF;
       END LOOP;
 
       DBMS_LOB.APPEND(v_xml, TO_CLOB('</sheetData></worksheet>'));
@@ -609,10 +612,12 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
     EXCEPTION
       WHEN OTHERS THEN
         IF DBMS_SQL.IS_OPEN(v_cursor) THEN DBMS_SQL.CLOSE_CURSOR(v_cursor); END IF;
+        IF v_row_clob IS NOT NULL THEN DBMS_LOB.FREETEMPORARY(v_row_clob); END IF;
         RAISE;
     END;
 
     DBMS_SQL.CLOSE_CURSOR(v_cursor);
+    DBMS_LOB.FREETEMPORARY(v_row_clob);
     RETURN v_xml;
   END gen_sheet_xml;
 
@@ -631,7 +636,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
            || ' uniqueCount="' || (p_ss_index) || '">'));
     FOR i IN 0..(p_ss_index - 1) LOOP
       DBMS_LOB.APPEND(v_xml, TO_CLOB('<si><t xml:space="preserve">'
-                                  || p_ss_list(i) || '</t></si>'));
+                                  || xml_escape(p_ss_list(i)) || '</t></si>'));
     END LOOP;
     DBMS_LOB.APPEND(v_xml, TO_CLOB('</sst>'));
     RETURN v_xml;
@@ -661,8 +666,14 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
     p_sql        IN CLOB
   ) IS
   BEGIN
+    IF TRIM(p_sheet_name) IS NULL THEN
+      RAISE_APPLICATION_ERROR(-20002, 'PKG_XLSX_EXPORT.add_sheet: sheet name cannot be NULL or empty.');
+    END IF;
+    IF p_sql IS NULL OR DBMS_LOB.GETLENGTH(p_sql) = 0 THEN
+      RAISE_APPLICATION_ERROR(-20003, 'PKG_XLSX_EXPORT.add_sheet: SQL text cannot be NULL or empty.');
+    END IF;
     g_sheet_count := g_sheet_count + 1;
-    g_sheets(g_sheet_count).sheet_name := SUBSTR(p_sheet_name, 1, 31);
+    g_sheets(g_sheet_count).sheet_name := REGEXP_REPLACE(SUBSTR(p_sheet_name, 1, 31), '[\\/:*?\[\]]', '_');
     g_sheets(g_sheet_count).sql_text   := p_sql;
   END;
 
@@ -682,9 +693,12 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
         'PKG_XLSX_EXPORT: No sheets registered. Call add_sheet first.');
     END IF;
 
-    IF g_zip_blob IS NULL THEN
-      DBMS_LOB.CREATETEMPORARY(g_zip_blob, TRUE);
+    -- Always reset ZIP state to prevent stale entries from previous calls
+    g_zip_entries.DELETE;
+    IF g_zip_blob IS NOT NULL THEN
+      DBMS_LOB.FREETEMPORARY(g_zip_blob);
     END IF;
+    DBMS_LOB.CREATETEMPORARY(g_zip_blob, TRUE);
 
     TYPE t_clob_tab IS TABLE OF CLOB INDEX BY PLS_INTEGER;
     v_sheet_xmls t_clob_tab;

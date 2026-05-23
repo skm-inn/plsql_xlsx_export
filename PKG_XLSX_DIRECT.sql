@@ -35,7 +35,7 @@
 -- =============================================================================
 -- STEP 1: Package Specification
 -- =============================================================================
-CREATE OR REPLACE PACKAGE PKG_XLSX_DIRECT AS
+CREATE OR REPLACE PACKAGE PKG_XLSX_DIRECT AUTHID CURRENT_USER AS
 
   -- ---------------------------------------------------------------------------
   -- Query delimiter used to split multiple SQL statements in p_queries.
@@ -142,63 +142,36 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
     v_total  NUMBER;
     v_dlen   PLS_INTEGER := LENGTH(DELIM);
     v_chunk  CLOB;
+    v_frag_len NUMBER;
   BEGIN
-    -- Append delimiter to simplify loop termination
+    -- Append delimiter as CLOB character data (not RAW)
     DBMS_LOB.CREATETEMPORARY(v_chunk, TRUE);
     DBMS_LOB.APPEND(v_chunk, p_input);
-    DBMS_LOB.WRITEAPPEND(v_chunk, v_dlen,
-                         UTL_RAW.CAST_TO_RAW(DELIM));
+    DBMS_LOB.APPEND(v_chunk, TO_CLOB(DELIM));
     v_total := DBMS_LOB.GETLENGTH(v_chunk);
 
     LOOP
-      -- Find next delimiter position
-      v_end := DBMS_LOB.INSTR(v_chunk,
-                               UTL_RAW.CAST_TO_RAW(DELIM),
-                               v_pos);
+      -- Search with VARCHAR2 pattern (correct overload for CLOB)
+      v_end := DBMS_LOB.INSTR(v_chunk, DELIM, v_pos);
       EXIT WHEN v_end = 0 OR v_pos > v_total;
 
-      v_idx := v_idx + 1;
-      DBMS_LOB.CREATETEMPORARY(v_result(v_idx), TRUE);
-
-      -- Extract the fragment between current pos and delimiter
-      DECLARE
-        v_frag_len NUMBER := v_end - v_pos;
-        v_buf      VARCHAR2(32767);
-        v_read_pos NUMBER := v_pos;
-        v_remaining NUMBER := v_frag_len;
-        v_chunk_sz  NUMBER := 32767;
-        v_read_amt  NUMBER;
-      BEGIN
-        WHILE v_remaining > 0 LOOP
-          v_read_amt := LEAST(v_chunk_sz, v_remaining);
-          v_buf := DBMS_LOB.SUBSTR(v_chunk, v_read_amt, v_read_pos);
-          DBMS_LOB.WRITEAPPEND(v_result(v_idx),
-                               LENGTHB(v_buf),
-                               UTL_RAW.CAST_TO_RAW(v_buf));
-          v_read_pos  := v_read_pos  + v_read_amt;
-          v_remaining := v_remaining - v_read_amt;
-        END LOOP;
-      END;
-
-      -- Trim the fragment CLOB
-      DECLARE
-        v_trimmed CLOB;
-        v_raw_sql VARCHAR2(32767);
-      BEGIN
-        v_raw_sql := TRIM(DBMS_LOB.SUBSTR(v_result(v_idx),
-                                          DBMS_LOB.GETLENGTH(v_result(v_idx)), 1));
-        DBMS_LOB.FREETEMPORARY(v_result(v_idx));
+      v_frag_len := v_end - v_pos;
+      IF v_frag_len > 0 THEN
+        v_idx := v_idx + 1;
         DBMS_LOB.CREATETEMPORARY(v_result(v_idx), TRUE);
-        DBMS_LOB.WRITEAPPEND(v_result(v_idx),
-                             LENGTHB(v_raw_sql),
-                             UTL_RAW.CAST_TO_RAW(v_raw_sql));
-      END;
+        -- Use DBMS_LOB.COPY for safe extraction of any-length fragment
+        DBMS_LOB.COPY(v_result(v_idx), v_chunk, v_frag_len, 1, v_pos);
+      END IF;
 
       v_pos := v_end + v_dlen;
     END LOOP;
 
     DBMS_LOB.FREETEMPORARY(v_chunk);
     RETURN v_result;
+  EXCEPTION
+    WHEN OTHERS THEN
+      BEGIN DBMS_LOB.FREETEMPORARY(v_chunk); EXCEPTION WHEN OTHERS THEN NULL; END;
+      RAISE;
   END split_queries;
 
   -- ===========================================================================
@@ -311,7 +284,10 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
       EXIT WHEN INSTR('|'||p_used_names||'|','|'||v_name||'|') = 0;
       v_name := v_base||'_'||LPAD(v_seq,2,'0');
       v_seq  := v_seq + 1;
-      EXIT WHEN v_seq > 999;
+      IF v_seq > 999 THEN
+        v_name := SUBSTR(v_base, 1, 22) || '_' || TO_CHAR(SYSDATE, 'HH24MISS');
+        EXIT;
+      END IF;
     END LOOP;
     p_used_names := p_used_names
                  || CASE WHEN p_used_names IS NOT NULL THEN '|' END
@@ -350,6 +326,22 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
     v_wbname := NVL(NULLIF(TRIM(p_workbook_name),''),
                     default_workbook_name);
 
+    -- Validate each query is a SELECT or WITH statement (prevent DML injection)
+    FOR i IN 1..v_sheet_count LOOP
+      DECLARE
+        v_first_word VARCHAR2(10);
+      BEGIN
+        v_first_word := UPPER(TRIM(REGEXP_SUBSTR(
+                         DBMS_LOB.SUBSTR(p_sqls(i), 100, 1),
+                         '[A-Z]+')));
+        IF v_first_word NOT IN ('SELECT', 'WITH') THEN
+          RAISE_APPLICATION_ERROR(-20012,
+            'PKG_XLSX_DIRECT: Only SELECT/WITH statements are permitted. Query ' || i ||
+            ' starts with: ' || v_first_word);
+        END IF;
+      END;
+    END LOOP;
+
     -- Initialise core engine
     PKG_XLSX_EXPORT.init(v_wbname);
 
@@ -378,7 +370,8 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
   EXCEPTION
     WHEN OTHERS THEN
       RAISE_APPLICATION_ERROR(-20011,
-        'PKG_XLSX_DIRECT.build_xlsx failed: ' || SQLERRM);
+        'PKG_XLSX_DIRECT.build_xlsx failed: ' || SQLERRM
+        || CHR(10) || DBMS_UTILITY.FORMAT_ERROR_BACKTRACE);
   END build_xlsx;
 
   -- ===========================================================================

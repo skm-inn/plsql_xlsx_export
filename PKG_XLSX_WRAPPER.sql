@@ -354,7 +354,10 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
                       '|' || v_name || '|') = 0;
       v_name := v_base || '_' || LPAD(v_seq, 2, '0');
       v_seq  := v_seq + 1;
-      EXIT WHEN v_seq > 999;
+      IF v_seq > 999 THEN
+        v_name := SUBSTR(v_base, 1, 22) || '_' || TO_CHAR(SYSDATE, 'HH24MISS');
+        EXIT;
+      END IF;
     END LOOP;
 
     p_used_names := p_used_names
@@ -438,18 +441,17 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
   PROCEDURE purge_old_exports(p_days IN NUMBER DEFAULT 7) IS
     v_purged PLS_INTEGER := 0;
   BEGIN
-    FOR r IN (SELECT EXPORT_UID, EXPORT_NAME FROM XLSX_EXPORT_RESULTS
-              WHERE  CREATED_ON < SYSTIMESTAMP - NUMTODSINTERVAL(p_days, 'DAY'))
-    LOOP
-      log_action(r.EXPORT_UID, 'PURGED',
-                 'Auto-purged (>' || p_days || ' days): ' || r.EXPORT_NAME);
-      v_purged := v_purged + 1;
-    END LOOP;
-
     DELETE FROM XLSX_EXPORT_RESULTS
     WHERE  CREATED_ON < SYSTIMESTAMP - NUMTODSINTERVAL(p_days, 'DAY');
+    v_purged := SQL%ROWCOUNT;
     COMMIT;
-
+    IF v_purged > 0 THEN
+      log_action(NULL, 'PURGED',
+                 v_purged || ' export(s) auto-purged (>' || p_days || ' days)');
+    END IF;
+    DELETE FROM XLSX_EXPORT_LOG
+    WHERE LOG_TIME < SYSTIMESTAMP - NUMTODSINTERVAL(p_days * 2, 'DAY');
+    COMMIT;
     DBMS_OUTPUT.PUT_LINE('[PURGE] ' || v_purged
       || ' export(s) older than ' || p_days || ' day(s) removed.');
   END purge_old_exports;
@@ -617,7 +619,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
   EXCEPTION
     WHEN OTHERS THEN
       log_action(v_uid, 'FAILED', SQLERRM);
-      DBMS_OUTPUT.PUT_LINE('[ERROR] ' || SQLERRM);
+      DBMS_OUTPUT.PUT_LINE('[ERROR] Export failed. Check XLSX_EXPORT_LOG for UID: ' || v_uid);
       RAISE;
   END generate_xlsx;
 
