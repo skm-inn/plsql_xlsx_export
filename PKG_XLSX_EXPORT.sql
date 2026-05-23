@@ -683,10 +683,11 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
   END;
 
   FUNCTION build_blob RETURN BLOB IS
-    v_ss_list   DBMS_SQL.VARCHAR2A;
-    v_ss_index  PLS_INTEGER := 0;
-    v_sheet_xml CLOB;
-    v_blob      BLOB;
+    TYPE t_clob_tab IS TABLE OF CLOB INDEX BY PLS_INTEGER;
+    v_ss_list    DBMS_SQL.VARCHAR2A;
+    v_ss_index   PLS_INTEGER := 0;
+    v_sheet_xmls t_clob_tab;
+    v_blob       BLOB;
   BEGIN
     IF g_sheet_count = 0 THEN
       RAISE_APPLICATION_ERROR(-20001,
@@ -699,9 +700,6 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
       DBMS_LOB.FREETEMPORARY(g_zip_blob);
     END IF;
     DBMS_LOB.CREATETEMPORARY(g_zip_blob, TRUE);
-
-    TYPE t_clob_tab IS TABLE OF CLOB INDEX BY PLS_INTEGER;
-    v_sheet_xmls t_clob_tab;
 
     FOR i IN 1..g_sheet_count LOOP
       v_sheet_xmls(i) := gen_sheet_xml(
