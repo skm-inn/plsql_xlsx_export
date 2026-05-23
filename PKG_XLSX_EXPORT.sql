@@ -116,8 +116,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
   END dbg;
 
   PROCEDURE init_crc_table IS
-    v_c  NUMBER;
-    v_k  PLS_INTEGER;
+    v_c NUMBER;
   BEGIN
     FOR i IN 0..255 LOOP
       v_c := i;
@@ -164,8 +163,6 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
 
   /** Convert integer to N-byte little-endian RAW */
   FUNCTION to_le(p_val IN NUMBER, p_bytes IN PLS_INTEGER) RETURN RAW IS
-    v_hex VARCHAR2(16);
-    v_len PLS_INTEGER := p_bytes * 2;
     v_out VARCHAR2(16) := '';
     v_tmp NUMBER := p_val;
   BEGIN
@@ -200,7 +197,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
 
   /** Convert VARCHAR2/CLOB text to BLOB (UTF-8) */
   FUNCTION str_to_blob(p_str IN CLOB) RETURN BLOB IS
-    v_blob BLOB;
+    v_blob     BLOB;
     v_dest_off NUMBER := 1;
     v_src_off  NUMBER := 1;
     v_lang     NUMBER := DBMS_LOB.DEFAULT_LANG_CTX;
@@ -211,6 +208,10 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
                            v_dest_off, v_src_off,
                            NLS_CHARSET_ID('AL32UTF8'), v_lang, v_warn);
     RETURN v_blob;
+  EXCEPTION
+    WHEN OTHERS THEN
+      BEGIN DBMS_LOB.FREETEMPORARY(v_blob); EXCEPTION WHEN OTHERS THEN NULL; END;
+      RAISE;
   END;
 
   /** Add a file (as BLOB) into the in-memory ZIP structure */
@@ -457,8 +458,8 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
       WHEN 178 THEN RETURN 3; -- TIME
       WHEN 180 THEN RETURN 3; -- TIMESTAMP
       WHEN 181 THEN RETURN 3; -- TIMESTAMP WITH TZ
-      WHEN 182 THEN RETURN 3; -- INTERVAL YM
-      WHEN 183 THEN RETURN 3; -- INTERVAL DS
+      WHEN 182 THEN RETURN 1; -- INTERVAL YEAR TO MONTH → VARCHAR2 (cannot assign to DATE)
+      WHEN 183 THEN RETURN 1; -- INTERVAL DAY TO SECOND → VARCHAR2 (cannot assign to DATE)
       WHEN 231 THEN RETURN 3; -- TIMESTAMP LOCAL TZ
       ELSE RETURN 1;           -- Default: treat as string
     END CASE;
@@ -756,6 +757,8 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
     FOR i IN 1..g_sheet_count LOOP
       zip_add_file('xl/worksheets/sheet' || i || '.xml',
                    str_to_blob(v_sheet_xmls(i)));
+      -- Free temp CLOB after conversion to avoid session-level temp segment leak
+      DBMS_LOB.FREETEMPORARY(v_sheet_xmls(i));
     END LOOP;
 
     zip_finish;
