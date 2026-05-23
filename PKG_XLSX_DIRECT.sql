@@ -41,10 +41,13 @@ CREATE OR REPLACE PACKAGE PKG_XLSX_DIRECT AUTHID CURRENT_USER AS
 
   -- ---------------------------------------------------------------------------
   -- Query delimiter used to split multiple SQL statements in p_queries.
-  -- Default: § (section sign).  Override if your SQL contains this character.
-  -- Usage:    q1 || PKG_XLSX_DIRECT.DELIM || q2 || PKG_XLSX_DIRECT.DELIM || q3
+  -- Default: CHR(30) — ASCII Record Separator (U+001E).
+  --   • Single byte in every Oracle character set (US7ASCII through AL32UTF8)
+  --   • Cannot appear in any SQL statement or data value
+  --   • Reliably found by DBMS_LOB.INSTR regardless of NLS_CHARACTERSET
+  -- Use get_delim() from SQL context; use DELIM constant from PL/SQL context.
   -- ---------------------------------------------------------------------------
-  DELIM CONSTANT VARCHAR2(3) := '§';
+  DELIM CONSTANT VARCHAR2(3) := CHR(30);
 
   -- ---------------------------------------------------------------------------
   -- get_delim: SQL-callable accessor for the DELIM constant.
@@ -598,12 +601,17 @@ END;
 
 
 -- ════════════════════════════════════════════════════════════════════
--- CHANGING THE DELIMITER
+-- DELIMITER NOTES
 -- ════════════════════════════════════════════════════════════════════
--- Default delimiter is § (section sign).
--- If your SQL text contains § use a different delimiter by
--- replacing DELIM in the package body Section A constant, e.g:
---   DELIM CONSTANT VARCHAR2(3) := '|~|';
--- Then recompile the package.
+-- Default delimiter is CHR(30) — ASCII Record Separator.
+-- This character cannot appear in any SQL statement and is reliably
+-- found by DBMS_LOB.INSTR on all Oracle character sets.
+--
+-- Use get_delim() to obtain the delimiter in SQL context:
+--   'SELECT 1 FROM DUAL' || PKG_XLSX_DIRECT.get_delim() || 'SELECT 2 FROM DUAL'
+--
+-- Do NOT hardcode '§' or other multi-byte characters as a delimiter —
+-- DBMS_LOB.INSTR may fail to match them on single-byte NLS_CHARACTERSET
+-- databases (e.g. WE8ISO8859P1).
 
 */
