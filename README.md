@@ -419,7 +419,7 @@ ORDER  BY LOG_TIME DESC;
 
 Use this package when you cannot create tables, or when you need the BLOB returned directly to a SQL caller (e.g. piped through `UTL_MAIL`, stored programmatically, or downloaded straight from SQL Developer without a table).
 
-All queries are passed as a single delimited string separated by `CHR(30)` (ASCII Record Separator — `PKG_XLSX_DIRECT.get_delim()`), making it callable directly from a `SELECT` statement.
+All queries are passed as a single delimited string separated by `~` (tilde — `PKG_XLSX_DIRECT.get_delim()`), making it callable directly from a `SELECT` statement.
 
 ### How the delimiter works
 
@@ -543,20 +543,20 @@ FROM DUAL;
 
 ### Changing the delimiter
 
-The default delimiter is `CHR(30)` (ASCII Record Separator, U+001E). This character:
+The default delimiter is `~` (tilde, ASCII 126). This character:
 - Is a single byte in **every** Oracle character set (US7ASCII → AL32UTF8)
-- Can **never** appear in a SQL statement
 - Is reliably found by `DBMS_LOB.INSTR` on all database character sets
+- **Caution:** `~` can appear in SQL (REGEXP patterns, custom `LIKE ESCAPE` clauses). If your SQL contains `~`, change the constant.
 
-> **Why not `§`?** The section sign (U+00A7) is stored as 2 bytes in multi-byte character sets (AL32UTF8). `DBMS_LOB.INSTR` with a multi-byte VARCHAR2 pattern can fail to match on single-byte NLS_CHARACTERSET databases (e.g. WE8ISO8859P1), silently returning 0 and causing the query split to fail.
+> **Why not `§`?** The section sign (U+00A7) is 2 bytes in AL32UTF8. `DBMS_LOB.INSTR` with a multi-byte VARCHAR2 pattern fails silently on single-byte NLS_CHARACTERSET databases (e.g. WE8ISO8859P1), returning 0 and causing the query split to produce 0 results.
 
-To change the delimiter if `CHR(30)` conflicts (extremely unlikely), update the `DELIM` constant in the package spec and recompile:
+To change the delimiter, update the `DELIM` constant in the package spec and recompile:
 
 ```sql
 -- In PKG_XLSX_DIRECT spec, change:
-DELIM CONSTANT VARCHAR2(3) := CHR(30);
--- to any string that cannot appear in your SQL, e.g.:
-DELIM CONSTANT VARCHAR2(3) := '|~|';
+DELIM CONSTANT VARCHAR2(3) := '~';
+-- to any character that cannot appear in your SQL, e.g.:
+DELIM CONSTANT VARCHAR2(3) := CHR(30);  -- ASCII Record Separator (safest)
 ```
 
 ---
@@ -611,7 +611,7 @@ Debug output format: `[HH:MI:SS.FFF] message`
 | Function / Procedure | Parameters | Description |
 |---|---|---|
 | `generate_xlsx` | `p_workbook_name DEFAULT NULL`<br>`p_queries CLOB`<br>`p_sheet_names DEFAULT NULL`<br>`p_debug DEFAULT 'N'` | Builds workbook, returns BLOB. Sheet names auto-derived if `p_sheet_names` is NULL. |
-| `get_delim()` | — | Returns the `CHR(30)` delimiter constant. Use this in SQL context instead of `PKG_XLSX_DIRECT.DELIM`. |
+| `get_delim()` | — | Returns the `~` delimiter constant. Use this in SQL context instead of `PKG_XLSX_DIRECT.DELIM`. |
 | `enable_debug` | — | Turns on DBMS_OUTPUT tracing for this session |
 | `disable_debug` | — | Turns off tracing (default) |
 

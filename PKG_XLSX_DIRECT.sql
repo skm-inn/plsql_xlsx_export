@@ -29,7 +29,7 @@
 --   Unparseable SQL       → Sheet_1, Sheet_2, ...
 --   Duplicate name        → suffixed _01, _02, ...
 --
--- QUERY SEPARATOR — default is  §  (section sign, Unicode 00A7).
+-- QUERY SEPARATOR — default is  ~  (tilde, ASCII 126).
 -- Change PKG_XLSX_DIRECT.DELIM if that character appears in your SQL.
 -- =============================================================================
 
@@ -41,13 +41,14 @@ CREATE OR REPLACE PACKAGE PKG_XLSX_DIRECT AUTHID CURRENT_USER AS
 
   -- ---------------------------------------------------------------------------
   -- Query delimiter used to split multiple SQL statements in p_queries.
-  -- Default: CHR(30) — ASCII Record Separator (U+001E).
+  -- Default: ~ (tilde, ASCII 126).
   --   • Single byte in every Oracle character set (US7ASCII through AL32UTF8)
-  --   • Cannot appear in any SQL statement or data value
-  --   • Reliably found by DBMS_LOB.INSTR regardless of NLS_CHARACTERSET
+  --   • Reliably found by DBMS_LOB.INSTR on all database character sets
+  --   • CAUTION: If your SQL contains ~ (rare but possible in REGEXP or ESCAPE
+  --     clauses) change this constant and recompile.
   -- Use get_delim() from SQL context; use DELIM constant from PL/SQL context.
   -- ---------------------------------------------------------------------------
-  DELIM CONSTANT VARCHAR2(3) := CHR(30);
+  DELIM CONSTANT VARCHAR2(3) := '~';
 
   -- ---------------------------------------------------------------------------
   -- get_delim: SQL-callable accessor for the DELIM constant.
@@ -178,10 +179,16 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
     DBMS_LOB.APPEND(v_chunk, p_input);
     DBMS_LOB.APPEND(v_chunk, TO_CLOB(DELIM));
     v_total := DBMS_LOB.GETLENGTH(v_chunk);
+    dbg('split_queries: input=' || (v_total - v_dlen)
+        || ' chars, delim=[' || DELIM || '] len=' || v_dlen
+        || ', chunk_total=' || v_total || ' chars');
 
     LOOP
       -- Search with VARCHAR2 pattern (correct overload for CLOB)
       v_end := DBMS_LOB.INSTR(v_chunk, DELIM, v_pos);
+      dbg('split_queries: scan from pos=' || v_pos
+          || ' → delim_at=' || v_end
+          || CASE WHEN v_end = 0 THEN ' (NOT FOUND — loop exits)' ELSE '' END);
       EXIT WHEN v_end = 0 OR v_pos > v_total;
 
       v_frag_len := v_end - v_pos;
@@ -190,13 +197,18 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
         DBMS_LOB.CREATETEMPORARY(v_result(v_idx), TRUE);
         -- Use DBMS_LOB.COPY for safe extraction of any-length fragment
         DBMS_LOB.COPY(v_result(v_idx), v_chunk, v_frag_len, 1, v_pos);
+        dbg('split_queries: fragment[' || v_idx || '] extracted'
+            || ' pos=' || v_pos || ' len=' || v_frag_len || ' chars'
+            || ' starts=[' || SUBSTR(DBMS_LOB.SUBSTR(v_result(v_idx), 40, 1), 1, 40) || ']');
+      ELSE
+        dbg('split_queries: zero-length fragment at pos=' || v_pos || ' — skipped');
       END IF;
 
       v_pos := v_end + v_dlen;
     END LOOP;
 
     DBMS_LOB.FREETEMPORARY(v_chunk);
-    dbg('split_queries: ' || v_idx || ' query/queries found');
+    dbg('split_queries: done — ' || v_idx || ' query/queries extracted');
     RETURN v_result;
   EXCEPTION
     WHEN OTHERS THEN
@@ -382,7 +394,9 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
     END LOOP;
 
     -- Initialise core engine
+    dbg('build_xlsx: calling PKG_XLSX_EXPORT.init...');
     PKG_XLSX_EXPORT.init(v_wbname);
+    dbg('build_xlsx: engine initialised');
 
     -- Register each sheet
     FOR i IN 1..v_sheet_count LOOP
@@ -392,20 +406,27 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
          AND TRIM(p_sheet_names(i)) IS NOT NULL
       THEN
         v_sheet_name := TRIM(p_sheet_names(i));
+        dbg('build_xlsx: sheet ' || i || ' — using explicit name "' || v_sheet_name || '"');
       ELSE
+        dbg('build_xlsx: sheet ' || i || ' — deriving name from SQL...');
         v_sheet_name := derive_sheet_name(p_sqls(i), v_complex_seq, i);
       END IF;
 
       -- Enforce uniqueness within this workbook
       v_sheet_name := unique_sheet_name(v_sheet_name, v_used_sheets);
 
-      dbg('build_xlsx: sheet ' || i || '/' || v_sheet_count || ' → "' || v_sheet_name || '"');
+      dbg('build_xlsx: sheet ' || i || '/' || v_sheet_count
+          || ' → "' || v_sheet_name || '" — registering with engine...');
       PKG_XLSX_EXPORT.add_sheet(v_sheet_name, p_sqls(i));
+      dbg('build_xlsx: sheet ' || i || ' registered OK');
     END LOOP;
 
     -- Build and return BLOB directly — no table write
+    dbg('build_xlsx: all ' || v_sheet_count || ' sheet(s) registered — invoking PKG_XLSX_EXPORT.build_blob...');
     v_blob := PKG_XLSX_EXPORT.build_blob;
-    dbg('build_xlsx: BLOB size=' || NVL(DBMS_LOB.GETLENGTH(v_blob),0) || ' bytes — done');
+    dbg('build_xlsx: build_blob returned '
+        || NVL(DBMS_LOB.GETLENGTH(v_blob),0) || ' bytes'
+        || CASE WHEN NVL(DBMS_LOB.GETLENGTH(v_blob),0) = 0 THEN ' *** WARNING: empty BLOB ***' ELSE ' — OK' END);
     RETURN v_blob;
 
   EXCEPTION
@@ -603,15 +624,15 @@ END;
 -- ════════════════════════════════════════════════════════════════════
 -- DELIMITER NOTES
 -- ════════════════════════════════════════════════════════════════════
--- Default delimiter is CHR(30) — ASCII Record Separator.
--- This character cannot appear in any SQL statement and is reliably
--- found by DBMS_LOB.INSTR on all Oracle character sets.
---
+-- Default delimiter is ~ (tilde, ASCII 126).
 -- Use get_delim() to obtain the delimiter in SQL context:
 --   'SELECT 1 FROM DUAL' || PKG_XLSX_DIRECT.get_delim() || 'SELECT 2 FROM DUAL'
 --
--- Do NOT hardcode '§' or other multi-byte characters as a delimiter —
--- DBMS_LOB.INSTR may fail to match them on single-byte NLS_CHARACTERSET
--- databases (e.g. WE8ISO8859P1).
+-- If your SQL contains ~ (rare — REGEXP, LIKE ESCAPE clauses), change
+-- DELIM in the package spec to CHR(30) (ASCII Record Separator — safest):
+--   DELIM CONSTANT VARCHAR2(3) := CHR(30);
+--
+-- Do NOT use '§' or other multi-byte characters — DBMS_LOB.INSTR fails
+-- silently on single-byte NLS_CHARACTERSET databases (e.g. WE8ISO8859P1).
 
 */

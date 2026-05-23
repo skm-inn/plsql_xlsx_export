@@ -202,14 +202,20 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
     v_src_off  NUMBER := 1;
     v_lang     NUMBER := DBMS_LOB.DEFAULT_LANG_CTX;
     v_warn     NUMBER;
+    v_src_len  NUMBER;
   BEGIN
+    v_src_len := NVL(DBMS_LOB.GETLENGTH(p_str), 0);
+    dbg('str_to_blob: converting ' || v_src_len || ' chars → BLOB (AL32UTF8)');
     DBMS_LOB.CREATETEMPORARY(v_blob, TRUE);
     DBMS_LOB.CONVERTTOBLOB(v_blob, p_str, DBMS_LOB.LOBMAXSIZE,
                            v_dest_off, v_src_off,
                            NLS_CHARSET_ID('AL32UTF8'), v_lang, v_warn);
+    dbg('str_to_blob: done → ' || NVL(DBMS_LOB.GETLENGTH(v_blob),0)
+        || ' bytes (warn=' || v_warn || ')');
     RETURN v_blob;
   EXCEPTION
     WHEN OTHERS THEN
+      dbg('str_to_blob: FAILED — ' || SQLERRM);
       BEGIN DBMS_LOB.FREETEMPORARY(v_blob); EXCEPTION WHEN OTHERS THEN NULL; END;
       RAISE;
   END;
@@ -531,15 +537,22 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
     DBMS_LOB.CREATETEMPORARY(v_xml, TRUE);
     DBMS_LOB.CREATETEMPORARY(v_row_clob, TRUE);
 
+    dbg('gen_sheet_xml: opening DBMS_SQL cursor...');
     v_cursor := DBMS_SQL.OPEN_CURSOR;
+    dbg('gen_sheet_xml: cursor=' || v_cursor || ' — parsing SQL ('
+        || NVL(DBMS_LOB.GETLENGTH(p_sql),0) || ' chars)...');
     BEGIN
       DBMS_SQL.PARSE(v_cursor, p_sql, DBMS_SQL.NATIVE);
+      dbg('gen_sheet_xml: SQL parsed OK');
       DBMS_SQL.DESCRIBE_COLUMNS(v_cursor, v_col_cnt, v_desc_tab);
+      dbg('gen_sheet_xml: ' || v_col_cnt || ' column(s) described');
 
       -- Define columns based on type
       FOR i IN 1..v_col_cnt LOOP
         v_type := v_desc_tab(i).col_type;
         v_buckets(i) := col_type_bucket(v_type);
+        dbg('gen_sheet_xml: col[' || i || '] "' || v_desc_tab(i).col_name
+            || '" type=' || v_type || ' bucket=' || v_buckets(i));
         CASE v_buckets(i)
           WHEN 1 THEN DBMS_SQL.DEFINE_COLUMN(v_cursor, i, v_varchar_val(1), 32767);
           WHEN 2 THEN DBMS_SQL.DEFINE_COLUMN(v_cursor, i, v_number_val(1));
@@ -548,9 +561,10 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
           ELSE        DBMS_SQL.DEFINE_COLUMN(v_cursor, i, v_varchar_val(1), 32767);
         END CASE;
       END LOOP;
-      dbg('gen_sheet_xml: ' || v_col_cnt || ' column(s) — executing query...');
+      dbg('gen_sheet_xml: all columns defined — executing query...');
 
       v_ret := DBMS_SQL.EXECUTE(v_cursor);
+      dbg('gen_sheet_xml: execute OK — beginning row fetch...');
 
       -- XML preamble
       DBMS_LOB.APPEND(v_xml,
@@ -628,14 +642,20 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
         DBMS_LOB.APPEND(v_row_clob, TO_CLOB('</row>'));
         DBMS_LOB.APPEND(v_xml, v_row_clob);
         v_row_num := v_row_num + 1;
+        -- Progress heartbeat every 1000 rows
+        IF MOD(v_row_num - 2, 1000) = 0 THEN
+          dbg('gen_sheet_xml: ' || (v_row_num - 2) || ' rows fetched so far'
+              || ' (XML=' || NVL(DBMS_LOB.GETLENGTH(v_xml),0) || ' chars)...');
+        END IF;
       END LOOP;
 
-      dbg('gen_sheet_xml: ' || (v_row_num - 2) || ' data row(s) fetched, '
+      dbg('gen_sheet_xml: row fetch complete — ' || (v_row_num - 2) || ' data row(s), '
           || p_ss_index || ' shared string(s) so far');
       DBMS_LOB.APPEND(v_xml, TO_CLOB('</sheetData></worksheet>'));
 
     EXCEPTION
       WHEN OTHERS THEN
+        dbg('gen_sheet_xml: EXCEPTION at row ' || v_row_num || ' — ' || SQLERRM);
         IF DBMS_SQL.IS_OPEN(v_cursor) THEN DBMS_SQL.CLOSE_CURSOR(v_cursor); END IF;
         IF v_row_clob IS NOT NULL THEN DBMS_LOB.FREETEMPORARY(v_row_clob); END IF;
         RAISE;
@@ -747,26 +767,38 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
     END LOOP;
 
     dbg('build_blob: zipping XML parts...');
+    dbg('build_blob: → [Content_Types].xml');
     zip_add_file('[Content_Types].xml',        str_to_blob(gen_content_types(g_sheet_count)));
+    dbg('build_blob: → _rels/.rels');
     zip_add_file('_rels/.rels',                str_to_blob(gen_rels));
+    dbg('build_blob: → xl/workbook.xml');
     zip_add_file('xl/workbook.xml',            str_to_blob(gen_workbook));
+    dbg('build_blob: → xl/styles.xml');
     zip_add_file('xl/styles.xml',              str_to_blob(gen_styles));
+    dbg('build_blob: → xl/sharedStrings.xml (' || v_ss_index || ' strings)');
     zip_add_file('xl/sharedStrings.xml',       str_to_blob(gen_shared_strings(v_ss_list, v_ss_index)));
+    dbg('build_blob: → xl/_rels/workbook.xml.rels');
     zip_add_file('xl/_rels/workbook.xml.rels', str_to_blob(gen_workbook_rels(g_sheet_count)));
 
     FOR i IN 1..g_sheet_count LOOP
+      dbg('build_blob: → xl/worksheets/sheet' || i || '.xml');
       zip_add_file('xl/worksheets/sheet' || i || '.xml',
                    str_to_blob(v_sheet_xmls(i)));
       -- Free temp CLOB after conversion to avoid session-level temp segment leak
       DBMS_LOB.FREETEMPORARY(v_sheet_xmls(i));
+      dbg('build_blob: sheet' || i || '.xml zipped and temp CLOB freed');
     END LOOP;
 
+    dbg('build_blob: calling zip_finish...');
     zip_finish;
     dbg('build_blob: zip_finish complete');
 
     DBMS_LOB.CREATETEMPORARY(v_blob, TRUE);
     DBMS_LOB.COPY(v_blob, g_zip_blob, DBMS_LOB.GETLENGTH(g_zip_blob));
-    dbg('build_blob: done — BLOB size=' || NVL(DBMS_LOB.GETLENGTH(v_blob),0) || ' bytes');
+    dbg('build_blob: done — BLOB size=' || NVL(DBMS_LOB.GETLENGTH(v_blob),0) || ' bytes'
+        || CASE WHEN NVL(DBMS_LOB.GETLENGTH(v_blob),0) = 0
+                THEN ' *** WARNING: empty BLOB — ZIP may be corrupt ***'
+                ELSE ' — OK' END);
     RETURN v_blob;
   END build_blob;
 
