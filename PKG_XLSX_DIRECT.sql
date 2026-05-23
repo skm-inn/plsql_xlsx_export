@@ -12,9 +12,11 @@
 --   SELECT PKG_XLSX_DIRECT.generate_xlsx(
 --              p_workbook_name => 'Deposit_Issue',
 --              p_queries       => 'SELECT * FROM ICTM_ACC WHERE ROWNUM<=10'
---                              || PKG_XLSX_DIRECT.DELIM
+--                              || PKG_XLSX_DIRECT.get_delim()
 --                              || q'[SELECT * FROM STTM_CUST_ACCOUNT
---                                    WHERE CUST_NAME LIKE 'A%']'
+--                                    WHERE CUST_NAME LIKE 'A%']',
+--              p_sheet_names   => 'Accounts' || PKG_XLSX_DIRECT.get_delim() || 'Customers',
+--              p_debug         => 'N'   -- 'Y' for debug tracing
 --          )
 --   FROM DUAL;
 --
@@ -52,54 +54,50 @@ CREATE OR REPLACE PACKAGE PKG_XLSX_DIRECT AUTHID CURRENT_USER AS
   FUNCTION get_delim RETURN VARCHAR2;
 
   -- ---------------------------------------------------------------------------
-  -- Overload 1 — sheet names auto-derived from SQL table names (simplest)
+  -- generate_xlsx — single function (no overloads, avoids PLS-307 ambiguity)
   --
   -- p_workbook_name : Workbook/file name (no .xlsx extension needed).
   --                   If NULL → SCHEMA_YYYYMMDD_HH24MISS
   -- p_queries       : One or more SELECT statements separated by DELIM.
+  -- p_sheet_names   : Optional. Sheet tab names separated by DELIM, in the same
+  --                   order as p_queries.
+  --                   NULL (default) → each sheet is auto-named from the SQL's
+  --                   primary table name, Complex_NN for joins, Sheet_N fallback.
+  --                   If fewer names than queries, remaining sheets are auto-named.
+  -- p_debug         : 'Y' enables DBMS_OUTPUT debug tracing for this call only.
+  --                   Default 'N' — no tracing.
   --
   -- Returns         : BLOB — a valid .xlsx file ready to download.
   --
-  -- Example (single query):
+  -- Example (auto sheet names):
   --   SELECT PKG_XLSX_DIRECT.generate_xlsx(
-  --              'My_Report',
-  --              'SELECT * FROM EMP WHERE DEPTNO = 10'
+  --              p_workbook_name => 'Deposit_Issue',
+  --              p_queries       => 'SELECT * FROM ICTM_ACC WHERE ROWNUM<=10'
+  --                              || PKG_XLSX_DIRECT.get_delim()
+  --                              || q'[SELECT * FROM STTM_CUST_ACCOUNT WHERE CUST_NAME LIKE 'A%']'
   --          ) FROM DUAL;
   --
-  -- Example (multiple queries):
+  -- Example (explicit sheet names):
   --   SELECT PKG_XLSX_DIRECT.generate_xlsx(
-  --              'Deposit_Issue',
-  --              'SELECT * FROM ICTM_ACC WHERE ROWNUM<=10'
-  --              || PKG_XLSX_DIRECT.DELIM
-  --              || q'[SELECT * FROM STTM_CUST_ACCOUNT WHERE CUST_NAME LIKE 'A%']'
+  --              p_workbook_name => 'Deposit_Issue',
+  --              p_queries       => 'SELECT * FROM ICTM_ACC WHERE ROWNUM<=10'
+  --                              || PKG_XLSX_DIRECT.get_delim()
+  --                              || q'[SELECT * FROM STTM_CUST_ACCOUNT WHERE CUST_NAME LIKE 'A%']',
+  --              p_sheet_names   => 'Accounts' || PKG_XLSX_DIRECT.get_delim() || 'Customers'
+  --          ) FROM DUAL;
+  --
+  -- Example (with debug tracing):
+  --   SELECT PKG_XLSX_DIRECT.generate_xlsx(
+  --              p_workbook_name => 'Deposit_Issue',
+  --              p_queries       => 'SELECT * FROM ICTM_ACC WHERE ROWNUM<=10',
+  --              p_debug         => 'Y'
   --          ) FROM DUAL;
   -- ---------------------------------------------------------------------------
   FUNCTION generate_xlsx(
     p_workbook_name IN VARCHAR2 DEFAULT NULL,
     p_queries       IN CLOB,
-    p_debug         IN VARCHAR2 DEFAULT 'N'   -- 'Y' enables DBMS_OUTPUT debug tracing
-  ) RETURN BLOB;
-
-  -- ---------------------------------------------------------------------------
-  -- Overload 2 — sheet names explicitly provided
-  --
-  -- p_sheet_names   : Sheet names separated by DELIM, matching order of p_queries.
-  --                   If fewer names than queries, remaining sheets are auto-named.
-  --
-  -- Example:
-  --   SELECT PKG_XLSX_DIRECT.generate_xlsx(
-  --              'Deposit_Issue',
-  --              'Accounts'      || PKG_XLSX_DIRECT.DELIM || 'Customers',
-  --              'SELECT * FROM ICTM_ACC WHERE ROWNUM<=10'
-  --              || PKG_XLSX_DIRECT.DELIM
-  --              || q'[SELECT * FROM STTM_CUST_ACCOUNT WHERE CUST_NAME LIKE 'A%']'
-  --          ) FROM DUAL;
-  -- ---------------------------------------------------------------------------
-  FUNCTION generate_xlsx(
-    p_workbook_name IN VARCHAR2 DEFAULT NULL,
-    p_sheet_names   IN VARCHAR2,
-    p_queries       IN CLOB,
-    p_debug         IN VARCHAR2 DEFAULT 'N'   -- 'Y' enables DBMS_OUTPUT debug tracing
+    p_sheet_names   IN VARCHAR2 DEFAULT NULL,
+    p_debug         IN VARCHAR2 DEFAULT 'N'
   ) RETURN BLOB;
 
   PROCEDURE enable_debug;   -- turn on DBMS_OUTPUT debug tracing
@@ -339,7 +337,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
   END;
 
   -- ===========================================================================
-  -- SECTION D: Core builder — shared by both overloads
+  -- SECTION D: Core builder
   -- ===========================================================================
   FUNCTION build_xlsx(
     p_workbook_name IN VARCHAR2,
@@ -423,50 +421,18 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
   END get_delim;
 
   -- ===========================================================================
-  -- SECTION F: Public overload 1 — auto sheet names
+  -- SECTION F: Public entry point — generate_xlsx
+  --   p_sheet_names NULL  → all sheet names auto-derived from SQL
+  --   p_sheet_names given → used as tab names (DELIM-separated, same order as queries)
   -- ===========================================================================
   FUNCTION generate_xlsx(
     p_workbook_name IN VARCHAR2 DEFAULT NULL,
     p_queries       IN CLOB,
-    p_debug         IN VARCHAR2 DEFAULT 'N'
-  ) RETURN BLOB IS
-    v_sqls        t_clob_tab;
-    v_empty_names t_str_tab;   -- empty: all sheet names auto-derived
-    v_result      BLOB;
-  BEGIN
-    -- Enable or disable debug for both this package and the core engine
-    IF UPPER(p_debug) = 'Y' THEN
-      enable_debug;
-      PKG_XLSX_EXPORT.enable_debug;
-    ELSE
-      disable_debug;
-      PKG_XLSX_EXPORT.disable_debug;
-    END IF;
-    dbg('generate_xlsx(auto-names): p_workbook="' || NVL(p_workbook_name,'(auto)') || '"');
-    v_sqls   := split_queries(p_queries);
-    v_result := build_xlsx(p_workbook_name, v_empty_names, v_sqls);
-    -- Always clean up debug flag before returning
-    disable_debug;
-    PKG_XLSX_EXPORT.disable_debug;
-    RETURN v_result;
-  EXCEPTION
-    WHEN OTHERS THEN
-      disable_debug;
-      PKG_XLSX_EXPORT.disable_debug;
-      RAISE;
-  END generate_xlsx;
-
-  -- ===========================================================================
-  -- SECTION G: Public overload 2 — explicit sheet names
-  -- ===========================================================================
-  FUNCTION generate_xlsx(
-    p_workbook_name IN VARCHAR2 DEFAULT NULL,
-    p_sheet_names   IN VARCHAR2,
-    p_queries       IN CLOB,
+    p_sheet_names   IN VARCHAR2 DEFAULT NULL,
     p_debug         IN VARCHAR2 DEFAULT 'N'
   ) RETURN BLOB IS
     v_sqls   t_clob_tab;
-    v_names  t_str_tab;
+    v_names  t_str_tab;   -- populated only when p_sheet_names is supplied
     v_result BLOB;
   BEGIN
     -- Enable or disable debug for both this package and the core engine
@@ -477,9 +443,12 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
       disable_debug;
       PKG_XLSX_EXPORT.disable_debug;
     END IF;
-    dbg('generate_xlsx(explicit-names): p_workbook="' || NVL(p_workbook_name,'(auto)') || '"');
-    v_sqls   := split_queries(p_queries);
-    v_names  := split_names(p_sheet_names);
+    dbg('generate_xlsx: p_workbook="' || NVL(p_workbook_name,'(auto)') || '"'
+      || CASE WHEN p_sheet_names IS NOT NULL THEN ' (explicit names)' ELSE ' (auto names)' END);
+    v_sqls := split_queries(p_queries);
+    IF p_sheet_names IS NOT NULL THEN
+      v_names := split_names(p_sheet_names);
+    END IF;
     v_result := build_xlsx(p_workbook_name, v_names, v_sqls);
     -- Always clean up debug flag before returning
     disable_debug;
@@ -503,52 +472,67 @@ END PKG_XLSX_DIRECT;
 /*
 
 -- ════════════════════════════════════════════════════════════════════
--- EXAMPLE 1: Single query, workbook name supplied, sheet auto-named
+-- EXAMPLE 1: Single query — workbook name supplied, sheet auto-named
 --   Workbook → DEPOSIT_ISSUE
 --   Sheet 1  → ICTM_ACC  (auto-derived from table name)
 -- ════════════════════════════════════════════════════════════════════
 SELECT PKG_XLSX_DIRECT.generate_xlsx(
-           'Deposit_Issue',
-           'SELECT * FROM ICTM_ACC WHERE ROWNUM <= 10'
+           p_workbook_name => 'Deposit_Issue',
+           p_queries       => 'SELECT * FROM ICTM_ACC WHERE ROWNUM <= 10'
        )
 FROM DUAL;
 
 
 -- ════════════════════════════════════════════════════════════════════
--- EXAMPLE 2: Multiple queries, sheet names auto-derived
+-- EXAMPLE 2: Multiple queries — sheet names auto-derived
 --   Workbook → DEPOSIT_ISSUE
 --   Sheet 1  → ICTM_ACC
---   Sheet 2  → STTM_CUST_ACCOUNT  (LIKE with character filter)
+--   Sheet 2  → STTM_CUST_ACCOUNT
 -- ════════════════════════════════════════════════════════════════════
 SELECT PKG_XLSX_DIRECT.generate_xlsx(
-           'Deposit_Issue',
-           'SELECT * FROM ICTM_ACC WHERE ROWNUM <= 10'
-           || PKG_XLSX_DIRECT.DELIM
-           || q'[SELECT * FROM STTM_CUST_ACCOUNT WHERE CUST_NAME LIKE 'A%']'
+           p_workbook_name => 'Deposit_Issue',
+           p_queries       => 'SELECT * FROM ICTM_ACC WHERE ROWNUM <= 10'
+                           || PKG_XLSX_DIRECT.get_delim()
+                           || q'[SELECT * FROM STTM_CUST_ACCOUNT WHERE CUST_NAME LIKE 'A%']'
        )
 FROM DUAL;
 
 
 -- ════════════════════════════════════════════════════════════════════
--- EXAMPLE 3: Multiple queries with explicit sheet names (overload 2)
+-- EXAMPLE 3: Multiple queries — explicit sheet names
 --   Workbook → DEPOSIT_ISSUE
 --   Sheet 1  → Accounts
 --   Sheet 2  → Customers
+--
+-- NOTE: p_queries comes BEFORE p_sheet_names in the signature.
+--       Always use named notation to avoid confusion.
 -- ════════════════════════════════════════════════════════════════════
 SELECT PKG_XLSX_DIRECT.generate_xlsx(
-           'Deposit_Issue',
-           -- sheet names (pipe-delimited, same order as queries)
-           'Accounts' || PKG_XLSX_DIRECT.DELIM || 'Customers',
-           -- queries
-           'SELECT * FROM ICTM_ACC WHERE ROWNUM <= 10'
-           || PKG_XLSX_DIRECT.DELIM
-           || q'[SELECT * FROM STTM_CUST_ACCOUNT WHERE CUST_NAME LIKE 'A%']'
+           p_workbook_name => 'Deposit_Issue',
+           p_queries       => 'SELECT * FROM ICTM_ACC WHERE ROWNUM <= 10'
+                           || PKG_XLSX_DIRECT.get_delim()
+                           || q'[SELECT * FROM STTM_CUST_ACCOUNT WHERE CUST_NAME LIKE 'A%']',
+           p_sheet_names   => 'Accounts' || PKG_XLSX_DIRECT.get_delim() || 'Customers'
        )
 FROM DUAL;
 
 
 -- ════════════════════════════════════════════════════════════════════
--- EXAMPLE 4: No workbook name — auto-named SCHEMA_YYYYMMDD_HH24MISS
+-- EXAMPLE 4: With debug tracing enabled for this call only
+--   All DBMS_OUTPUT lines appear timestamped: [HH:MI:SS.FFF] message
+-- ════════════════════════════════════════════════════════════════════
+SELECT PKG_XLSX_DIRECT.generate_xlsx(
+           p_workbook_name => 'Deposit_Issue',
+           p_queries       => 'SELECT * FROM ICTM_ACC WHERE ROWNUM <= 10'
+                           || PKG_XLSX_DIRECT.get_delim()
+                           || q'[SELECT * FROM STTM_CUST_ACCOUNT WHERE ACCOUNT_CLASS LIKE 'A%']',
+           p_debug         => 'Y'
+       )
+FROM DUAL;
+
+
+-- ════════════════════════════════════════════════════════════════════
+-- EXAMPLE 5: No workbook name — auto-named SCHEMA_YYYYMMDD_HH24MISS
 -- ════════════════════════════════════════════════════════════════════
 SELECT PKG_XLSX_DIRECT.generate_xlsx(
            p_queries => 'SELECT EMPNO, ENAME, SAL FROM EMP ORDER BY ENAME'
@@ -557,55 +541,44 @@ FROM DUAL;
 
 
 -- ════════════════════════════════════════════════════════════════════
--- EXAMPLE 5: WHERE clause with a plain character filter
---   Regular string: single quotes doubled  '' A% ''
+-- EXAMPLE 6: WHERE clause with a character filter (q'[...]' style)
 -- ════════════════════════════════════════════════════════════════════
 SELECT PKG_XLSX_DIRECT.generate_xlsx(
-           'EMP_Report',
-           'SELECT EMPNO, ENAME, JOB, SAL FROM EMP WHERE ENAME LIKE ''A%'''
+           p_workbook_name => 'EMP_Report',
+           p_queries       => q'[SELECT EMPNO, ENAME, JOB, SAL FROM EMP WHERE ENAME LIKE 'A%']'
        )
 FROM DUAL;
 
--- Same using q'[...]' — no escaping needed:
+-- Same using doubled quotes inside a regular string:
 SELECT PKG_XLSX_DIRECT.generate_xlsx(
-           'EMP_Report',
-           q'[SELECT EMPNO, ENAME, JOB, SAL FROM EMP WHERE ENAME LIKE 'A%']'
-       )
-FROM DUAL;
-
-
--- ════════════════════════════════════════════════════════════════════
--- EXAMPLE 6: WHERE clause where value contains an apostrophe (O'BRIEN)
--- ════════════════════════════════════════════════════════════════════
-
--- q'[...]' recommended — write value naturally, only SQL '' needed:
-SELECT PKG_XLSX_DIRECT.generate_xlsx(
-           'EMP_Report',
-           q'[SELECT EMPNO, ENAME, JOB FROM EMP WHERE ENAME = 'O''BRIEN']'
-       )
-FROM DUAL;
-
--- Regular string — every quote doubled:
-SELECT PKG_XLSX_DIRECT.generate_xlsx(
-           'EMP_Report',
-           'SELECT EMPNO, ENAME, JOB FROM EMP WHERE ENAME = ''O''''BRIEN'''
+           p_workbook_name => 'EMP_Report',
+           p_queries       => 'SELECT EMPNO, ENAME, JOB, SAL FROM EMP WHERE ENAME LIKE ''A%'''
        )
 FROM DUAL;
 
 
 -- ════════════════════════════════════════════════════════════════════
--- EXAMPLE 7: Value comes from a SQL bind / variable (PL/SQL block)
+-- EXAMPLE 7: WHERE value contains an apostrophe (O'BRIEN)
+-- ════════════════════════════════════════════════════════════════════
+SELECT PKG_XLSX_DIRECT.generate_xlsx(
+           p_workbook_name => 'EMP_Report',
+           p_queries       => q'[SELECT EMPNO, ENAME, JOB FROM EMP WHERE ENAME = 'O''BRIEN']'
+       )
+FROM DUAL;
+
+
+-- ════════════════════════════════════════════════════════════════════
+-- EXAMPLE 8: Value comes from a PL/SQL variable (dynamic SQL)
 -- ════════════════════════════════════════════════════════════════════
 DECLARE
   v_name VARCHAR2(100) := 'O''BRIEN';
   v_blob BLOB;
 BEGIN
   v_blob := PKG_XLSX_DIRECT.generate_xlsx(
-                'EMP_Report',
-                'SELECT EMPNO, ENAME, JOB FROM EMP '
-             || 'WHERE  ENAME = ' || CHR(39) || v_name || CHR(39)
+                p_workbook_name => 'EMP_Report',
+                p_queries       => 'SELECT EMPNO, ENAME, JOB FROM EMP '
+                                || 'WHERE ENAME = ' || CHR(39) || v_name || CHR(39)
             );
-  -- use v_blob as needed (e.g. insert into another table, send via UTL_MAIL)
   DBMS_OUTPUT.PUT_LINE('Size: ' || DBMS_LOB.GETLENGTH(v_blob) || ' bytes');
 END;
 /
