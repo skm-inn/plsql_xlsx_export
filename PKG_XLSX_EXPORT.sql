@@ -176,9 +176,10 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
   BEGIN
     v_len := DBMS_LOB.GETLENGTH(p_src);
     WHILE v_pos <= v_len LOOP
-      DBMS_LOB.READ(p_src, LEAST(v_amt, v_len - v_pos + 1), v_pos, v_buf);
+      v_amt := LEAST(32767, v_len - v_pos + 1);  -- must be a variable for IN OUT param
+      DBMS_LOB.READ(p_src, v_amt, v_pos, v_buf);
       DBMS_LOB.WRITEAPPEND(p_dest, UTL_RAW.LENGTH(v_buf), v_buf);
-      v_pos := v_pos + v_amt;
+      v_pos := v_pos + 32767;
     END LOOP;
   END;
 
