@@ -53,6 +53,9 @@ CREATE OR REPLACE PACKAGE PKG_XLSX_EXPORT AUTHID CURRENT_USER AS
    */
   FUNCTION get_workbook_name RETURN VARCHAR2;
 
+  PROCEDURE enable_debug;   -- turn on DBMS_OUTPUT debug tracing
+  PROCEDURE disable_debug;  -- turn off debug tracing (default)
+
 END PKG_XLSX_EXPORT;
 /
 
@@ -75,6 +78,18 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
   g_sheets        t_sheet_tab;
   g_workbook_name VARCHAR2(200);
   g_sheet_count   PLS_INTEGER := 0;
+
+  -- ============================================================
+  -- Debug flag — enable at runtime: PKG_XLSX_EXPORT.enable_debug;
+  -- ============================================================
+  g_debug BOOLEAN := FALSE;
+
+  PROCEDURE dbg(p_msg IN VARCHAR2) IS
+  BEGIN
+    IF g_debug THEN
+      DBMS_OUTPUT.PUT_LINE('[' || TO_CHAR(SYSTIMESTAMP,'HH24:MI:SS.FF3') || '] ' || p_msg);
+    END IF;
+  END dbg;
 
   -- ============================================================
   -- SECTION B: ZIP Builder (embedded AS_ZIP logic, adapted)
@@ -230,6 +245,9 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
     append_raw(g_zip_blob, UTL_RAW.CAST_TO_RAW(p_name));  -- filename
     -- File data
     append_blob(g_zip_blob, p_content);
+    dbg('zip_add[' || v_idx || ']: "' || p_name
+        || '" uncomp=' || v_entry.uncomp_size || ' bytes'
+        || ' offset=' || v_entry.offset);
   END;
 
   /** Finalise ZIP: write Central Directory + End of Central Directory */
@@ -276,6 +294,8 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
     append_raw(g_zip_blob, to_le(v_cd_size,   4));            -- CD size
     append_raw(g_zip_blob, to_le(v_cd_start,  4));            -- CD offset
     append_raw(g_zip_blob, to_le(0, 2));                      -- comment length
+    dbg('zip_finish: ' || g_zip_entries.COUNT || ' entries'
+        || ' CD_start=' || v_cd_start || ' CD_size=' || v_cd_size);
   END;
 
   -- ============================================================
@@ -527,6 +547,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
           ELSE        DBMS_SQL.DEFINE_COLUMN(v_cursor, i, v_varchar_val(1), 32767);
         END CASE;
       END LOOP;
+      dbg('gen_sheet_xml: ' || v_col_cnt || ' column(s) — executing query...');
 
       v_ret := DBMS_SQL.EXECUTE(v_cursor);
 
@@ -608,6 +629,8 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
         v_row_num := v_row_num + 1;
       END LOOP;
 
+      dbg('gen_sheet_xml: ' || (v_row_num - 2) || ' data row(s) fetched, '
+          || p_ss_index || ' shared string(s) so far');
       DBMS_LOB.APPEND(v_xml, TO_CLOB('</sheetData></worksheet>'));
 
     EXCEPTION
@@ -619,6 +642,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
 
     DBMS_SQL.CLOSE_CURSOR(v_cursor);
     DBMS_LOB.FREETEMPORARY(v_row_clob);
+    dbg('gen_sheet_xml: XML size=' || NVL(DBMS_LOB.GETLENGTH(v_xml),0) || ' chars');
     RETURN v_xml;
   END gen_sheet_xml;
 
@@ -640,6 +664,8 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
                                   || xml_escape(p_ss_list(i)) || '</t></si>'));
     END LOOP;
     DBMS_LOB.APPEND(v_xml, TO_CLOB('</sst>'));
+    dbg('gen_shared_strings: ' || p_ss_index || ' string(s)'
+        || ' XML size=' || NVL(DBMS_LOB.GETLENGTH(v_xml),0) || ' chars');
     RETURN v_xml;
   END;
 
@@ -660,6 +686,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
       DBMS_LOB.FREETEMPORARY(g_zip_blob);
     END IF;
     DBMS_LOB.CREATETEMPORARY(g_zip_blob, TRUE);
+    dbg('init: workbook="' || g_workbook_name || '" — state reset');
   END;
 
   PROCEDURE add_sheet(
@@ -674,6 +701,8 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
       RAISE_APPLICATION_ERROR(-20003, 'PKG_XLSX_EXPORT.add_sheet: SQL text cannot be NULL or empty.');
     END IF;
     g_sheet_count := g_sheet_count + 1;
+    dbg('add_sheet[' || g_sheet_count || ']: name="' || SUBSTR(p_sheet_name,1,31)
+        || '" sql_len=' || NVL(DBMS_LOB.GETLENGTH(p_sql),0) || ' chars');
     g_sheets(g_sheet_count).sheet_name := REGEXP_REPLACE(SUBSTR(p_sheet_name, 1, 31), '[\\/:*?\[\]]', '_');
     g_sheets(g_sheet_count).sql_text   := p_sql;
   END;
@@ -682,6 +711,9 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
   BEGIN
     RETURN g_workbook_name;
   END;
+
+  PROCEDURE enable_debug  IS BEGIN g_debug := TRUE;  END;
+  PROCEDURE disable_debug IS BEGIN g_debug := FALSE; END;
 
   FUNCTION build_blob RETURN BLOB IS
     TYPE t_clob_tab IS TABLE OF CLOB INDEX BY PLS_INTEGER;
@@ -694,6 +726,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
       RAISE_APPLICATION_ERROR(-20001,
         'PKG_XLSX_EXPORT: No sheets registered. Call add_sheet first.');
     END IF;
+    dbg('build_blob: starting — ' || g_sheet_count || ' sheet(s) registered');
 
     -- Always reset ZIP state to prevent stale entries from previous calls
     g_zip_entries.DELETE;
@@ -702,11 +735,17 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
     END IF;
     DBMS_LOB.CREATETEMPORARY(g_zip_blob, TRUE);
 
+    dbg('build_blob: generating sheet XML...');
     FOR i IN 1..g_sheet_count LOOP
+      dbg('build_blob: sheet ' || i || '/' || g_sheet_count
+          || ' "' || g_sheets(i).sheet_name || '" → gen_sheet_xml');
       v_sheet_xmls(i) := gen_sheet_xml(
                            g_sheets(i).sql_text, v_ss_list, v_ss_index);
+      dbg('build_blob: sheet ' || i || ' XML done — '
+          || NVL(DBMS_LOB.GETLENGTH(v_sheet_xmls(i)),0) || ' chars');
     END LOOP;
 
+    dbg('build_blob: zipping XML parts...');
     zip_add_file('[Content_Types].xml',        str_to_blob(gen_content_types(g_sheet_count)));
     zip_add_file('_rels/.rels',                str_to_blob(gen_rels));
     zip_add_file('xl/workbook.xml',            str_to_blob(gen_workbook));
@@ -720,9 +759,11 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
     END LOOP;
 
     zip_finish;
+    dbg('build_blob: zip_finish complete');
 
     DBMS_LOB.CREATETEMPORARY(v_blob, TRUE);
     DBMS_LOB.COPY(v_blob, g_zip_blob, DBMS_LOB.GETLENGTH(g_zip_blob));
+    dbg('build_blob: done — BLOB size=' || NVL(DBMS_LOB.GETLENGTH(v_blob),0) || ' bytes');
     RETURN v_blob;
   END build_blob;
 

@@ -136,6 +136,9 @@ CREATE OR REPLACE PACKAGE PKG_XLSX_WRAPPER AS
   /** Re-print the download SQL for a given UID. */
   PROCEDURE print_retrieval_sql(p_export_uid IN VARCHAR2);
 
+  PROCEDURE enable_debug;   -- turn on DBMS_OUTPUT debug tracing
+  PROCEDURE disable_debug;  -- turn off debug tracing (default)
+
 END PKG_XLSX_WRAPPER;
 /
 
@@ -166,6 +169,21 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
     COMMIT;
   END;
 
+  -- ============================================================
+  -- Debug flag — enable at runtime: PKG_XLSX_WRAPPER.enable_debug;
+  -- ============================================================
+  g_debug BOOLEAN := FALSE;
+
+  PROCEDURE dbg(p_msg IN VARCHAR2) IS
+  BEGIN
+    IF g_debug THEN
+      DBMS_OUTPUT.PUT_LINE('[' || TO_CHAR(SYSTIMESTAMP,'HH24:MI:SS.FF3') || '] ' || p_msg);
+    END IF;
+  END dbg;
+
+  PROCEDURE enable_debug  IS BEGIN g_debug := TRUE;  END;
+  PROCEDURE disable_debug IS BEGIN g_debug := FALSE; END;
+
   -- ===========================================================================
   -- SECTION B: Workbook name resolution
   -- ===========================================================================
@@ -184,10 +202,12 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
       FROM   XLSX_EXPORT_RESULTS
       WHERE  UPPER(EXPORT_NAME) = v_name;
       EXIT WHEN v_exists = 0;
+      dbg('unique_workbook_name: "' || UPPER(TRIM(p_base)) || '" exists → trying with suffix _' || LPAD(v_seq,2,'0'));
       v_name := UPPER(TRIM(p_base)) || '_' || LPAD(v_seq, 2, '0');
       v_seq  := v_seq + 1;
       EXIT WHEN v_seq > 999;        -- safety cap
     END LOOP;
+    dbg('unique_workbook_name: resolved → "' || v_name || '"');
     RETURN v_name;
   END;
 
@@ -419,6 +439,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
     v_name  VARCHAR2(200);
     v_cnt   PLS_INTEGER;
   BEGIN
+    dbg('delete_export: UID="' || p_export_uid || '"');
     SELECT COUNT(*), MAX(EXPORT_NAME)
     INTO   v_cnt, v_name
     FROM   XLSX_EXPORT_RESULTS
@@ -432,6 +453,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
     DELETE FROM XLSX_EXPORT_RESULTS WHERE EXPORT_UID = p_export_uid;
     COMMIT;
     log_action(p_export_uid, 'DELETED', 'Manually deleted: ' || v_name);
+    dbg('delete_export: removed "' || v_name || '"');
     DBMS_OUTPUT.PUT_LINE('[DELETE] Removed: ' || v_name
                       || '  (UID: ' || p_export_uid || ')');
   END delete_export;
@@ -441,10 +463,12 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
   PROCEDURE purge_old_exports(p_days IN NUMBER DEFAULT 7) IS
     v_purged PLS_INTEGER := 0;
   BEGIN
+    dbg('purge_old_exports: p_days=' || p_days || ' — scanning...');
     DELETE FROM XLSX_EXPORT_RESULTS
     WHERE  CREATED_ON < SYSTIMESTAMP - NUMTODSINTERVAL(p_days, 'DAY');
     v_purged := SQL%ROWCOUNT;
     COMMIT;
+    dbg('purge_old_exports: deleted ' || v_purged || ' export(s)');
     IF v_purged > 0 THEN
       log_action(NULL, 'PURGED',
                  v_purged || ' export(s) auto-purged (>' || p_days || ' days)');
@@ -536,6 +560,8 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
     -- ── 0. Auto-purge silently ─────────────────────────────────────────────
     BEGIN purge_old_exports(7); EXCEPTION WHEN OTHERS THEN NULL; END;
 
+    dbg('generate_xlsx: entry — workbook="' || NVL(p_workbook_name,'(auto)') || '"');
+
     -- ── 1. UID ────────────────────────────────────────────────────────────
     v_uid := RAWTOHEX(SYS_GUID());
 
@@ -556,6 +582,8 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
     IF p_sheet9_sql  IS NOT NULL THEN v_cnt:=v_cnt+1; v_raw_names(v_cnt):=p_sheet9_name;  v_sqls(v_cnt):=p_sheet9_sql;  END IF;
     IF p_sheet10_sql IS NOT NULL THEN v_cnt:=v_cnt+1; v_raw_names(v_cnt):=p_sheet10_name; v_sqls(v_cnt):=p_sheet10_sql; END IF;
 
+    dbg('generate_xlsx: ' || v_cnt || ' sheet(s) collected');
+
     -- ── 3. Resolve WORKBOOK name ───────────────────────────────────────────
     v_workbook := unique_workbook_name(
                     CASE WHEN p_workbook_name IS NOT NULL
@@ -563,6 +591,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
                          ELSE default_workbook_name
                     END
                   );
+    dbg('generate_xlsx: workbook resolved → "' || v_workbook || '"');
 
     -- ── 4. Resolve WORKSHEET names ─────────────────────────────────────────
     FOR i IN 1..v_cnt LOOP
@@ -575,6 +604,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
       END IF;
       -- Ensure no duplicate tab names within this workbook
       v_final_names(i) := unique_sheet_name(v_derived, v_used_sheets);
+      dbg('generate_xlsx: sheet ' || i || ' → "' || v_final_names(i) || '"');
     END LOOP;
 
     -- ── 5. Log + announce ─────────────────────────────────────────────────
@@ -600,6 +630,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
 
     -- build_blob: pure engine call — zero table dependency
     v_xlsx_blob := PKG_XLSX_EXPORT.build_blob;
+    dbg('generate_xlsx: BLOB built — ' || NVL(DBMS_LOB.GETLENGTH(v_xlsx_blob),0) || ' bytes');
 
     -- ── 7. Wrapper owns the INSERT — table lives here, not in core engine ────
     INSERT INTO XLSX_EXPORT_RESULTS
@@ -610,6 +641,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
 
     log_action(v_uid, 'COMPLETED',
                'Export ID: ' || v_export_id || ' | ' || v_workbook);
+    dbg('generate_xlsx: stored in XLSX_EXPORT_RESULTS, ID=' || v_export_id);
 
     -- ── 8. Success notification ───────────────────────────────────────────
     print_retrieval_sql(v_uid);

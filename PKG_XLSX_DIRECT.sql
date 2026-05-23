@@ -100,6 +100,9 @@ CREATE OR REPLACE PACKAGE PKG_XLSX_DIRECT AUTHID CURRENT_USER AS
     p_queries       IN CLOB
   ) RETURN BLOB;
 
+  PROCEDURE enable_debug;   -- turn on DBMS_OUTPUT debug tracing
+  PROCEDURE disable_debug;  -- turn off debug tracing (default)
+
 END PKG_XLSX_DIRECT;
 /
 
@@ -114,6 +117,21 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
   -- ===========================================================================
   TYPE t_str_tab  IS TABLE OF VARCHAR2(32767) INDEX BY PLS_INTEGER;
   TYPE t_clob_tab IS TABLE OF CLOB            INDEX BY PLS_INTEGER;
+
+  -- ============================================================
+  -- Debug flag — enable at runtime: PKG_XLSX_DIRECT.enable_debug;
+  -- ============================================================
+  g_debug BOOLEAN := FALSE;
+
+  PROCEDURE dbg(p_msg IN VARCHAR2) IS
+  BEGIN
+    IF g_debug THEN
+      DBMS_OUTPUT.PUT_LINE('[' || TO_CHAR(SYSTIMESTAMP,'HH24:MI:SS.FF3') || '] ' || p_msg);
+    END IF;
+  END dbg;
+
+  PROCEDURE enable_debug  IS BEGIN g_debug := TRUE;  END;
+  PROCEDURE disable_debug IS BEGIN g_debug := FALSE; END;
 
   -- ===========================================================================
   -- SECTION B: String splitter
@@ -137,6 +155,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
       v_pos := v_end + v_dlen;
       EXIT WHEN v_pos > LENGTH(v_str);
     END LOOP;
+    dbg('split_names: ' || v_idx || ' name(s) found');
     RETURN v_result;
   END split_names;
 
@@ -174,6 +193,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
     END LOOP;
 
     DBMS_LOB.FREETEMPORARY(v_chunk);
+    dbg('split_queries: ' || v_idx || ' query/queries found');
     RETURN v_result;
   EXCEPTION
     WHEN OTHERS THEN
@@ -270,11 +290,16 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
         v_pos   := v_end + 1;
       END LOOP;
     END IF;
-    IF    v_count = 1 THEN RETURN SUBSTR(v_first, 1, 31);
+    IF v_count = 1 THEN
+      dbg('derive_sheet_name: 1 table → "' || SUBSTR(v_first,1,31) || '"');
+      RETURN SUBSTR(v_first, 1, 31);
     ELSIF v_count > 1 THEN
       p_complex_seq := p_complex_seq + 1;
+      dbg('derive_sheet_name: ' || v_count || ' tables → "COMPLEX_' || LPAD(p_complex_seq,2,'0') || '"');
       RETURN 'COMPLEX_' || LPAD(p_complex_seq, 2, '0');
-    ELSE  RETURN 'SHEET_' || p_sheet_pos;
+    ELSE
+      dbg('derive_sheet_name: no tables → "SHEET_' || p_sheet_pos || '"');
+      RETURN 'SHEET_' || p_sheet_pos;
     END IF;
   END derive_sheet_name;
 
@@ -289,6 +314,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
   BEGIN
     LOOP
       EXIT WHEN INSTR('|'||p_used_names||'|','|'||v_name||'|') = 0;
+      dbg('unique_sheet_name: "' || p_candidate || '" duplicate → trying "' || v_base||'_'||LPAD(v_seq,2,'0') || '"');
       v_name := v_base||'_'||LPAD(v_seq,2,'0');
       v_seq  := v_seq + 1;
       IF v_seq > 999 THEN
@@ -299,6 +325,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
     p_used_names := p_used_names
                  || CASE WHEN p_used_names IS NOT NULL THEN '|' END
                  || v_name;
+    dbg('unique_sheet_name: resolved → "' || v_name || '"');
     RETURN v_name;
   END unique_sheet_name;
 
@@ -332,6 +359,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
     -- Resolve workbook name
     v_wbname := NVL(NULLIF(TRIM(p_workbook_name),''),
                     default_workbook_name);
+    dbg('build_xlsx: workbook="' || v_wbname || '" — ' || v_sheet_count || ' query/queries');
 
     -- Validate each query is a SELECT or WITH statement (prevent DML injection)
     FOR i IN 1..v_sheet_count LOOP
@@ -346,6 +374,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
             'PKG_XLSX_DIRECT: Only SELECT/WITH statements are permitted. Query ' || i ||
             ' starts with: ' || v_first_word);
         END IF;
+        dbg('sql_guard[' || i || ']: starts with "' || v_first_word || '" — OK');
       END;
     END LOOP;
 
@@ -367,11 +396,13 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
       -- Enforce uniqueness within this workbook
       v_sheet_name := unique_sheet_name(v_sheet_name, v_used_sheets);
 
+      dbg('build_xlsx: sheet ' || i || '/' || v_sheet_count || ' → "' || v_sheet_name || '"');
       PKG_XLSX_EXPORT.add_sheet(v_sheet_name, p_sqls(i));
     END LOOP;
 
     -- Build and return BLOB directly — no table write
     v_blob := PKG_XLSX_EXPORT.build_blob;
+    dbg('build_xlsx: BLOB size=' || NVL(DBMS_LOB.GETLENGTH(v_blob),0) || ' bytes — done');
     RETURN v_blob;
 
   EXCEPTION
@@ -399,6 +430,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
     v_sqls       t_clob_tab;
     v_empty_names t_str_tab;   -- empty: all sheet names auto-derived
   BEGIN
+    dbg('generate_xlsx(auto-names): p_workbook="' || NVL(p_workbook_name,'(auto)') || '"');
     v_sqls := split_queries(p_queries);
     RETURN build_xlsx(p_workbook_name, v_empty_names, v_sqls);
   END generate_xlsx;
@@ -414,6 +446,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
     v_sqls  t_clob_tab;
     v_names t_str_tab;
   BEGIN
+    dbg('generate_xlsx(explicit-names): p_workbook="' || NVL(p_workbook_name,'(auto)') || '"');
     v_sqls  := split_queries(p_queries);
     v_names := split_names(p_sheet_names);
     RETURN build_xlsx(p_workbook_name, v_names, v_sqls);
