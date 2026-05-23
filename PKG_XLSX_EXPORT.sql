@@ -510,7 +510,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
     v_cell_ref    VARCHAR2(10);
     v_row_num     PLS_INTEGER := 1;
 
-    -- Column value buffers
+    -- Column value buffers (associative arrays, keyed by column position)
     TYPE t_varchar_tab IS TABLE OF VARCHAR2(32767) INDEX BY PLS_INTEGER;
     TYPE t_number_tab  IS TABLE OF NUMBER          INDEX BY PLS_INTEGER;
     TYPE t_date_tab    IS TABLE OF DATE            INDEX BY PLS_INTEGER;
@@ -523,6 +523,17 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
 
     TYPE t_bucket_tab IS TABLE OF PLS_INTEGER INDEX BY PLS_INTEGER;
     v_buckets t_bucket_tab;
+
+    -- Scalar templates for DBMS_SQL.DEFINE_COLUMN.
+    -- Oracle PL/SQL: "the element must exist even for OUT parameters on
+    -- associative arrays." Passing v_varchar_val(i) where i has never been
+    -- assigned raises ORA-01403 because the IN read fires before NOCOPY
+    -- can bypass the copy. Scalar vars are always initialised (NULL) and
+    -- safe to pass as IN parameters.
+    v_vc_tmpl  VARCHAR2(32767);   -- type template for VARCHAR2/CHAR/RAW columns
+    v_nm_tmpl  NUMBER;            -- type template for NUMBER columns
+    v_dt_tmpl  DATE;              -- type template for DATE/TIMESTAMP columns
+    v_cl_tmpl  CLOB;              -- type template for CLOB/LONG columns
 
     -- Shared string helper
     FUNCTION get_ss_idx(p_str IN VARCHAR2) RETURN PLS_INTEGER IS
@@ -547,21 +558,36 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
       DBMS_SQL.DESCRIBE_COLUMNS(v_cursor, v_col_cnt, v_desc_tab);
       dbg('gen_sheet_xml: ' || v_col_cnt || ' column(s) described');
 
-      -- Define columns based on type
+      -- Define columns and pre-initialise value arrays.
+      -- Two rules obeyed here:
+      --   (a) DEFINE_COLUMN uses scalar template vars (v_vc_tmpl etc.), never
+      --       array elements — avoids ORA-01403 on the unread IN parameter.
+      --   (b) Each v_xxx_val(i) is assigned NULL before the FETCH loop so that
+      --       COLUMN_VALUE finds a pre-existing element (required even for OUT).
       FOR i IN 1..v_col_cnt LOOP
         v_type := v_desc_tab(i).col_type;
         v_buckets(i) := col_type_bucket(v_type);
         dbg('gen_sheet_xml: col[' || i || '] "' || v_desc_tab(i).col_name
             || '" type=' || v_type || ' bucket=' || v_buckets(i));
         CASE v_buckets(i)
-          WHEN 1 THEN DBMS_SQL.DEFINE_COLUMN(v_cursor, i, v_varchar_val(1), 32767);
-          WHEN 2 THEN DBMS_SQL.DEFINE_COLUMN(v_cursor, i, v_number_val(1));
-          WHEN 3 THEN DBMS_SQL.DEFINE_COLUMN(v_cursor, i, v_date_val(1));
-          WHEN 4 THEN DBMS_SQL.DEFINE_COLUMN(v_cursor, i, v_clob_val(1));
-          ELSE        DBMS_SQL.DEFINE_COLUMN(v_cursor, i, v_varchar_val(1), 32767);
+          WHEN 1 THEN
+            v_varchar_val(i) := NULL;
+            DBMS_SQL.DEFINE_COLUMN(v_cursor, i, v_vc_tmpl, 32767);
+          WHEN 2 THEN
+            v_number_val(i) := NULL;
+            DBMS_SQL.DEFINE_COLUMN(v_cursor, i, v_nm_tmpl);
+          WHEN 3 THEN
+            v_date_val(i) := NULL;
+            DBMS_SQL.DEFINE_COLUMN(v_cursor, i, v_dt_tmpl);
+          WHEN 4 THEN
+            v_clob_val(i) := NULL;
+            DBMS_SQL.DEFINE_COLUMN(v_cursor, i, v_cl_tmpl);
+          ELSE
+            v_varchar_val(i) := NULL;   -- default: treat as VARCHAR2
+            DBMS_SQL.DEFINE_COLUMN(v_cursor, i, v_vc_tmpl, 32767);
         END CASE;
       END LOOP;
-      dbg('gen_sheet_xml: all columns defined — executing query...');
+      dbg('gen_sheet_xml: all ' || v_col_cnt || ' columns defined — executing query...');
 
       v_ret := DBMS_SQL.EXECUTE(v_cursor);
       dbg('gen_sheet_xml: execute OK — beginning row fetch...');
