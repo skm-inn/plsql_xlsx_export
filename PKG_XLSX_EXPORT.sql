@@ -1,25 +1,3 @@
--- =============================================================================
--- PKG_XLSX_EXPORT - Pure PL/SQL XLSX Generator (Core Engine)
--- Compatible: Oracle 12c, 19c
--- No APEX | No UTL_FILE | No Shell | No External Tools | No Table dependency
---
--- Responsibilities (ONLY these — nothing else):
---   1. Accept sheet registrations (init / add_sheet)
---   2. Execute each SQL query via DBMS_SQL
---   3. Build a valid XLSX file as a BLOB in memory (ZIP + XML)
---   4. Return that BLOB to the caller via build_blob
---
--- This package has ZERO table references.
--- It compiles and runs in ANY environment including read-only schemas.
---
--- Persistence (storing the BLOB) is the responsibility of the caller:
---   - PKG_XLSX_WRAPPER  : stores into XLSX_EXPORT_RESULTS (full-privilege env)
---   - PKG_XLSX_DIRECT   : returns BLOB directly to SQL caller (read-only env)
--- =============================================================================
-
--- -----------------------------------------------------------------------------
--- STEP 1: Package Specification
--- -----------------------------------------------------------------------------
 CREATE OR REPLACE PACKAGE PKG_XLSX_EXPORT AUTHID CURRENT_USER AS
 
   /**
@@ -59,9 +37,6 @@ CREATE OR REPLACE PACKAGE PKG_XLSX_EXPORT AUTHID CURRENT_USER AS
 END PKG_XLSX_EXPORT;
 /
 
--- -----------------------------------------------------------------------------
--- STEP 2: Package Body
--- -----------------------------------------------------------------------------
 CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
 
   -- ============================================================
