@@ -405,16 +405,21 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
         || '<numFmts count="1">'
         || '<numFmt numFmtId="164" formatCode="YYYY-MM-DD HH:mm:SS"/>'
         || '</numFmts>'
-        -- Fonts: 0=normal, 1=bold header
+        -- Fonts: 0=normal, 1=bold header (white text for contrast on green)
         || '<fonts count="2">'
         || '<font><sz val="11"/><name val="Calibri"/></font>'
-        || '<font><b/><sz val="11"/><name val="Calibri"/></font>'
+        || '<font><b/><sz val="11"/><name val="Calibri"/><color rgb="FFFFFFFF"/></font>'
         || '</fonts>'
-        -- Fills: 0=none, 1=grey125 (required), 2=header blue
-        || '<fills count="3">'
+        -- Fills:
+        --   0 = none      (required by OOXML spec, must be first)
+        --   1 = gray125   (required by OOXML spec, must be second)
+        --   2 = white     (solid FFFFFFFF — data cells / sheet background)
+        --   3 = green     (solid FF70AD47 — Green, Accent 6 — header row)
+        || '<fills count="4">'
         || '<fill><patternFill patternType="none"/></fill>'
         || '<fill><patternFill patternType="gray125"/></fill>'
-        || '<fill><patternFill patternType="solid"><fgColor rgb="FF4472C4"/></patternFill></fill>'
+        || '<fill><patternFill patternType="solid"><fgColor rgb="FFFFFFFF"/></patternFill></fill>'
+        || '<fill><patternFill patternType="solid"><fgColor rgb="FF70AD47"/></patternFill></fill>'
         || '</fills>'
         -- Borders: 0=none
         || '<borders count="1">'
@@ -424,15 +429,15 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
         || '<cellStyleXfs count="1">'
         || '<xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>'
         || '</cellStyleXfs>'
-        -- Cell xfs:
-        -- 0 = default (string/number)
-        -- 1 = header (bold + blue fill + white font)
-        -- 2 = date format
+        -- Cell xfs (indices used by worksheet cells via s= attribute):
+        --   0 = default   — normal font, white fill (string / number)
+        --   1 = header    — bold white font, green fill, centred
+        --   2 = date      — date format, white fill
         || '<cellXfs count="3">'
-        || '<xf numFmtId="0"   fontId="0" fillId="0" borderId="0" xfId="0"/>'
-        || '<xf numFmtId="0"   fontId="1" fillId="2" borderId="0" xfId="0">'
+        || '<xf numFmtId="0"   fontId="0" fillId="2" borderId="0" xfId="0"/>'
+        || '<xf numFmtId="0"   fontId="1" fillId="3" borderId="0" xfId="0">'
         || '<alignment horizontal="center"/></xf>'
-        || '<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+        || '<xf numFmtId="164" fontId="0" fillId="2" borderId="0" xfId="0"/>'
         || '</cellXfs>'
         || '</styleSheet>';
   END;
