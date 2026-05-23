@@ -121,7 +121,9 @@ CREATE OR REPLACE PACKAGE PKG_XLSX_WRAPPER AS
     p_sheet7_name   IN VARCHAR2 DEFAULT NULL,  p_sheet7_sql  IN CLOB DEFAULT NULL,
     p_sheet8_name   IN VARCHAR2 DEFAULT NULL,  p_sheet8_sql  IN CLOB DEFAULT NULL,
     p_sheet9_name   IN VARCHAR2 DEFAULT NULL,  p_sheet9_sql  IN CLOB DEFAULT NULL,
-    p_sheet10_name  IN VARCHAR2 DEFAULT NULL,  p_sheet10_sql IN CLOB DEFAULT NULL
+    p_sheet10_name  IN VARCHAR2 DEFAULT NULL,  p_sheet10_sql IN CLOB DEFAULT NULL,
+    -- Debug flag: 'Y' enables DBMS_OUTPUT tracing for this call only
+    p_debug         IN VARCHAR2 DEFAULT 'N'
   ) RETURN VARCHAR2;
 
   /** Delete a specific export by UID. */
@@ -536,7 +538,8 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
     p_sheet7_name   IN VARCHAR2 DEFAULT NULL,  p_sheet7_sql  IN CLOB DEFAULT NULL,
     p_sheet8_name   IN VARCHAR2 DEFAULT NULL,  p_sheet8_sql  IN CLOB DEFAULT NULL,
     p_sheet9_name   IN VARCHAR2 DEFAULT NULL,  p_sheet9_sql  IN CLOB DEFAULT NULL,
-    p_sheet10_name  IN VARCHAR2 DEFAULT NULL,  p_sheet10_sql IN CLOB DEFAULT NULL
+    p_sheet10_name  IN VARCHAR2 DEFAULT NULL,  p_sheet10_sql IN CLOB DEFAULT NULL,
+    p_debug         IN VARCHAR2 DEFAULT 'N'
   ) RETURN VARCHAR2 IS
 
     TYPE t_str_tab  IS TABLE OF VARCHAR2(31)  INDEX BY PLS_INTEGER;
@@ -557,15 +560,24 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
 
   BEGIN
 
-    -- ── 0. Auto-purge silently ─────────────────────────────────────────────
+    -- ── 0. Debug toggle ────────────────────────────────────────────────────
+    IF UPPER(p_debug) = 'Y' THEN
+      enable_debug;
+      PKG_XLSX_EXPORT.enable_debug;
+    ELSE
+      disable_debug;
+      PKG_XLSX_EXPORT.disable_debug;
+    END IF;
+
+    -- ── 1. Auto-purge silently ─────────────────────────────────────────────
     BEGIN purge_old_exports(7); EXCEPTION WHEN OTHERS THEN NULL; END;
 
     dbg('generate_xlsx: entry — workbook="' || NVL(p_workbook_name,'(auto)') || '"');
 
-    -- ── 1. UID ────────────────────────────────────────────────────────────
+    -- ── 2. UID ────────────────────────────────────────────────────────────
     v_uid := RAWTOHEX(SYS_GUID());
 
-    -- ── 2. Collect sheets into arrays ─────────────────────────────────────
+    -- ── 3. Collect sheets into arrays ─────────────────────────────────────
     -- Sheet 1 is mandatory (p_sheet1_sql has no DEFAULT NULL)
     v_cnt := 1;
     v_raw_names(1) := p_sheet1_name;
@@ -584,7 +596,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
 
     dbg('generate_xlsx: ' || v_cnt || ' sheet(s) collected');
 
-    -- ── 3. Resolve WORKBOOK name ───────────────────────────────────────────
+    -- ── 4. Resolve WORKBOOK name ───────────────────────────────────────────
     v_workbook := unique_workbook_name(
                     CASE WHEN p_workbook_name IS NOT NULL
                          THEN p_workbook_name
@@ -593,7 +605,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
                   );
     dbg('generate_xlsx: workbook resolved → "' || v_workbook || '"');
 
-    -- ── 4. Resolve WORKSHEET names ─────────────────────────────────────────
+    -- ── 5. Resolve WORKSHEET names ─────────────────────────────────────────
     FOR i IN 1..v_cnt LOOP
       IF v_raw_names(i) IS NOT NULL THEN
         -- Caller provided a name — just enforce uniqueness within workbook
@@ -607,7 +619,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
       dbg('generate_xlsx: sheet ' || i || ' → "' || v_final_names(i) || '"');
     END LOOP;
 
-    -- ── 5. Log + announce ─────────────────────────────────────────────────
+    -- ── 6. Log + announce ─────────────────────────────────────────────────
     log_action(v_uid, 'INITIATED',
                'Workbook: ' || v_workbook || ' | Sheets: ' || v_cnt);
 
@@ -622,7 +634,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
     END LOOP;
     print_line(68, '=');
 
-    -- ── 6. Build XLSX via base package (returns BLOB — no table touch) ──────
+    -- ── 7. Build XLSX via base package (returns BLOB — no table touch) ──────
     PKG_XLSX_EXPORT.init(v_workbook);
     FOR i IN 1..v_cnt LOOP
       PKG_XLSX_EXPORT.add_sheet(v_final_names(i), v_sqls(i));
@@ -632,7 +644,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
     v_xlsx_blob := PKG_XLSX_EXPORT.build_blob;
     dbg('generate_xlsx: BLOB built — ' || NVL(DBMS_LOB.GETLENGTH(v_xlsx_blob),0) || ' bytes');
 
-    -- ── 7. Wrapper owns the INSERT — table lives here, not in core engine ────
+    -- ── 8. Wrapper owns the INSERT — table lives here, not in core engine ────
     INSERT INTO XLSX_EXPORT_RESULTS
            (EXPORT_UID, EXPORT_NAME, XLSX_BLOB, STATUS)
     VALUES (v_uid, v_workbook, v_xlsx_blob, 'COMPLETE')
@@ -643,8 +655,12 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
                'Export ID: ' || v_export_id || ' | ' || v_workbook);
     dbg('generate_xlsx: stored in XLSX_EXPORT_RESULTS, ID=' || v_export_id);
 
-    -- ── 8. Success notification ───────────────────────────────────────────
+    -- ── 9. Success notification ───────────────────────────────────────────
     print_retrieval_sql(v_uid);
+
+    -- Clean up debug flag so it does not leak into subsequent calls
+    disable_debug;
+    PKG_XLSX_EXPORT.disable_debug;
 
     RETURN v_uid;
 
@@ -652,6 +668,8 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
     WHEN OTHERS THEN
       log_action(v_uid, 'FAILED', SQLERRM);
       DBMS_OUTPUT.PUT_LINE('[ERROR] Export failed. Check XLSX_EXPORT_LOG for UID: ' || v_uid);
+      disable_debug;
+      PKG_XLSX_EXPORT.disable_debug;
       RAISE;
   END generate_xlsx;
 

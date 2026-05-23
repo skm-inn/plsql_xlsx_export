@@ -76,7 +76,8 @@ CREATE OR REPLACE PACKAGE PKG_XLSX_DIRECT AUTHID CURRENT_USER AS
   -- ---------------------------------------------------------------------------
   FUNCTION generate_xlsx(
     p_workbook_name IN VARCHAR2 DEFAULT NULL,
-    p_queries       IN CLOB
+    p_queries       IN CLOB,
+    p_debug         IN VARCHAR2 DEFAULT 'N'   -- 'Y' enables DBMS_OUTPUT debug tracing
   ) RETURN BLOB;
 
   -- ---------------------------------------------------------------------------
@@ -97,7 +98,8 @@ CREATE OR REPLACE PACKAGE PKG_XLSX_DIRECT AUTHID CURRENT_USER AS
   FUNCTION generate_xlsx(
     p_workbook_name IN VARCHAR2 DEFAULT NULL,
     p_sheet_names   IN VARCHAR2,
-    p_queries       IN CLOB
+    p_queries       IN CLOB,
+    p_debug         IN VARCHAR2 DEFAULT 'N'   -- 'Y' enables DBMS_OUTPUT debug tracing
   ) RETURN BLOB;
 
   PROCEDURE enable_debug;   -- turn on DBMS_OUTPUT debug tracing
@@ -425,14 +427,33 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
   -- ===========================================================================
   FUNCTION generate_xlsx(
     p_workbook_name IN VARCHAR2 DEFAULT NULL,
-    p_queries       IN CLOB
+    p_queries       IN CLOB,
+    p_debug         IN VARCHAR2 DEFAULT 'N'
   ) RETURN BLOB IS
-    v_sqls       t_clob_tab;
+    v_sqls        t_clob_tab;
     v_empty_names t_str_tab;   -- empty: all sheet names auto-derived
+    v_result      BLOB;
   BEGIN
+    -- Enable or disable debug for both this package and the core engine
+    IF UPPER(p_debug) = 'Y' THEN
+      enable_debug;
+      PKG_XLSX_EXPORT.enable_debug;
+    ELSE
+      disable_debug;
+      PKG_XLSX_EXPORT.disable_debug;
+    END IF;
     dbg('generate_xlsx(auto-names): p_workbook="' || NVL(p_workbook_name,'(auto)') || '"');
-    v_sqls := split_queries(p_queries);
-    RETURN build_xlsx(p_workbook_name, v_empty_names, v_sqls);
+    v_sqls   := split_queries(p_queries);
+    v_result := build_xlsx(p_workbook_name, v_empty_names, v_sqls);
+    -- Always clean up debug flag before returning
+    disable_debug;
+    PKG_XLSX_EXPORT.disable_debug;
+    RETURN v_result;
+  EXCEPTION
+    WHEN OTHERS THEN
+      disable_debug;
+      PKG_XLSX_EXPORT.disable_debug;
+      RAISE;
   END generate_xlsx;
 
   -- ===========================================================================
@@ -441,15 +462,34 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
   FUNCTION generate_xlsx(
     p_workbook_name IN VARCHAR2 DEFAULT NULL,
     p_sheet_names   IN VARCHAR2,
-    p_queries       IN CLOB
+    p_queries       IN CLOB,
+    p_debug         IN VARCHAR2 DEFAULT 'N'
   ) RETURN BLOB IS
-    v_sqls  t_clob_tab;
-    v_names t_str_tab;
+    v_sqls   t_clob_tab;
+    v_names  t_str_tab;
+    v_result BLOB;
   BEGIN
+    -- Enable or disable debug for both this package and the core engine
+    IF UPPER(p_debug) = 'Y' THEN
+      enable_debug;
+      PKG_XLSX_EXPORT.enable_debug;
+    ELSE
+      disable_debug;
+      PKG_XLSX_EXPORT.disable_debug;
+    END IF;
     dbg('generate_xlsx(explicit-names): p_workbook="' || NVL(p_workbook_name,'(auto)') || '"');
-    v_sqls  := split_queries(p_queries);
-    v_names := split_names(p_sheet_names);
-    RETURN build_xlsx(p_workbook_name, v_names, v_sqls);
+    v_sqls   := split_queries(p_queries);
+    v_names  := split_names(p_sheet_names);
+    v_result := build_xlsx(p_workbook_name, v_names, v_sqls);
+    -- Always clean up debug flag before returning
+    disable_debug;
+    PKG_XLSX_EXPORT.disable_debug;
+    RETURN v_result;
+  EXCEPTION
+    WHEN OTHERS THEN
+      disable_debug;
+      PKG_XLSX_EXPORT.disable_debug;
+      RAISE;
   END generate_xlsx;
 
 END PKG_XLSX_DIRECT;
