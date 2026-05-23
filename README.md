@@ -657,7 +657,8 @@ Debug output format: `[HH:MI:SS.FFF] message`
 
 | Feature | Detail |
 |---|---|
-| **Header row** | Bold, blue background (`#4472C4`), centered, auto-generated from column names |
+| **Header row** | Bold, white text, Green Accent 6 background (`#70AD47`), centered, auto-generated from column names |
+| **Sheet background** | Explicit solid white (`#FFFFFF`) on all data and date cells |
 | **Encoding** | UTF-8 throughout |
 | **Compression** | STORED mode (no DEFLATE) — Excel opens natively, no corruption risk |
 | **Shared strings** | All text centralised in `xl/sharedStrings.xml` per OOXML spec |
