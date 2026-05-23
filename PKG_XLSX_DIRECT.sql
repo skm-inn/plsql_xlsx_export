@@ -45,6 +45,13 @@ CREATE OR REPLACE PACKAGE PKG_XLSX_DIRECT AUTHID CURRENT_USER AS
   DELIM CONSTANT VARCHAR2(3) := '§';
 
   -- ---------------------------------------------------------------------------
+  -- get_delim: SQL-callable accessor for the DELIM constant.
+  -- Use this from SQL context — package constants are not reachable from SQL.
+  -- Example: 'SELECT 1 FROM DUAL' || PKG_XLSX_DIRECT.get_delim() || 'SELECT 2 FROM DUAL'
+  -- ---------------------------------------------------------------------------
+  FUNCTION get_delim RETURN VARCHAR2;
+
+  -- ---------------------------------------------------------------------------
   -- Overload 1 — sheet names auto-derived from SQL table names (simplest)
   --
   -- p_workbook_name : Workbook/file name (no .xlsx extension needed).
@@ -375,7 +382,15 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
   END build_xlsx;
 
   -- ===========================================================================
-  -- SECTION E: Public overload 1 — auto sheet names
+  -- SECTION E: get_delim — SQL-callable accessor for the DELIM constant
+  -- ===========================================================================
+  FUNCTION get_delim RETURN VARCHAR2 IS
+  BEGIN
+    RETURN DELIM;
+  END get_delim;
+
+  -- ===========================================================================
+  -- SECTION F: Public overload 1 — auto sheet names
   -- ===========================================================================
   FUNCTION generate_xlsx(
     p_workbook_name IN VARCHAR2 DEFAULT NULL,
@@ -389,7 +404,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
   END generate_xlsx;
 
   -- ===========================================================================
-  -- SECTION F: Public overload 2 — explicit sheet names
+  -- SECTION G: Public overload 2 — explicit sheet names
   -- ===========================================================================
   FUNCTION generate_xlsx(
     p_workbook_name IN VARCHAR2 DEFAULT NULL,
