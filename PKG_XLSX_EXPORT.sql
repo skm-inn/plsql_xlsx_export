@@ -122,7 +122,8 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
       v_c := i;
       FOR j IN 0..7 LOOP
         IF MOD(v_c, 2) = 1 THEN
-          v_c := 3988292384 - TRUNC(v_c / 2); -- 0xEDB88320
+          v_c := TRUNC(v_c / 2);
+          v_c := 3988292384 + v_c - 2 * BITAND(3988292384, v_c); -- XOR with 0xEDB88320
         ELSE
           v_c := TRUNC(v_c / 2);
         END IF;
@@ -167,7 +168,7 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
     v_tmp NUMBER := p_val;
   BEGIN
     FOR i IN 1..p_bytes LOOP
-      v_out := v_out || LPAD(TO_CHAR(MOD(v_tmp, 256), 'XX'), 2, '0');
+      v_out := v_out || LPAD(TRIM(TO_CHAR(MOD(v_tmp, 256), 'XX')), 2, '0');
       v_tmp := TRUNC(v_tmp / 256);
     END LOOP;
     RETURN HEXTORAW(v_out);
