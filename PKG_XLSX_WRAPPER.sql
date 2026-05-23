@@ -150,6 +150,11 @@ END PKG_XLSX_WRAPPER;
 -- =============================================================================
 CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
 
+  -- ============================================================
+  -- Debug flag — enable at runtime: PKG_XLSX_WRAPPER.enable_debug;
+  -- ============================================================
+  g_debug BOOLEAN := FALSE;
+
   -- ===========================================================================
   -- SECTION A: Utility helpers
   -- ===========================================================================
@@ -170,11 +175,6 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_WRAPPER AS
     VALUES (p_uid, p_act, SUBSTR(p_msg, 1, 4000));
     COMMIT;
   END;
-
-  -- ============================================================
-  -- Debug flag — enable at runtime: PKG_XLSX_WRAPPER.enable_debug;
-  -- ============================================================
-  g_debug BOOLEAN := FALSE;
 
   PROCEDURE dbg(p_msg IN VARCHAR2) IS
   BEGIN
