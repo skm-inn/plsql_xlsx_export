@@ -80,18 +80,6 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
   g_sheet_count   PLS_INTEGER := 0;
 
   -- ============================================================
-  -- Debug flag — enable at runtime: PKG_XLSX_EXPORT.enable_debug;
-  -- ============================================================
-  g_debug BOOLEAN := FALSE;
-
-  PROCEDURE dbg(p_msg IN VARCHAR2) IS
-  BEGIN
-    IF g_debug THEN
-      DBMS_OUTPUT.PUT_LINE('[' || TO_CHAR(SYSTIMESTAMP,'HH24:MI:SS.FF3') || '] ' || p_msg);
-    END IF;
-  END dbg;
-
-  -- ============================================================
   -- SECTION B: ZIP Builder (embedded AS_ZIP logic, adapted)
   --            Builds a valid ZIP archive entirely in PL/SQL
   --            using RAW/BLOB manipulation.
@@ -114,6 +102,18 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_EXPORT AS
   -- ---- CRC32 Table (standard polynomial 0xEDB88320) ----
   TYPE t_crc_tab IS TABLE OF NUMBER INDEX BY PLS_INTEGER;
   g_crc_tab t_crc_tab;
+
+  -- ============================================================
+  -- Debug flag — enable at runtime: PKG_XLSX_EXPORT.enable_debug;
+  -- ============================================================
+  g_debug BOOLEAN := FALSE;
+
+  PROCEDURE dbg(p_msg IN VARCHAR2) IS
+  BEGIN
+    IF g_debug THEN
+      DBMS_OUTPUT.PUT_LINE('[' || TO_CHAR(SYSTIMESTAMP,'HH24:MI:SS.FF3') || '] ' || p_msg);
+    END IF;
+  END dbg;
 
   PROCEDURE init_crc_table IS
     v_c  NUMBER;
