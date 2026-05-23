@@ -163,43 +163,67 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
     RETURN v_result;
   END split_names;
 
-  /** Split a CLOB containing delimited SQL statements into t_clob_tab */
+  /**
+   * Split a CLOB containing delimited SQL statements into t_clob_tab.
+   *
+   * Implementation note — why VARCHAR2 instead of DBMS_LOB.INSTR/COPY:
+   *   DBMS_LOB.CREATETEMPORARY / COPY fail silently on some Oracle builds when
+   *   the target is an associative-array element passed as IN OUT NOCOPY (the
+   *   engine cannot materialise the non-existent element for the IN read and
+   *   raises ORA-01403 internally). Standard INSTR/SUBSTR on VARCHAR2 avoids
+   *   all LOB mechanics for the split step; DBMS_LOB.WRITEAPPEND then writes
+   *   each fragment into a properly declared local CLOB variable before the
+   *   locator is stored in the result array.
+   *
+   *   Limit: combined query string must be <= 32,767 characters (DBMS_LOB.SUBSTR
+   *   cap). SQL statements in practice are never close to this boundary.
+   */
   FUNCTION split_queries(p_input IN CLOB) RETURN t_clob_tab IS
-    v_result t_clob_tab;
-    v_pos    NUMBER      := 1;
-    v_end    NUMBER;
-    v_idx    PLS_INTEGER := 0;
-    v_total  NUMBER;
-    v_dlen   PLS_INTEGER := LENGTH(DELIM);
-    v_chunk  CLOB;
-    v_frag_len NUMBER;
+    v_result    t_clob_tab;
+    v_text      VARCHAR2(32767);   -- VARCHAR2 working copy (all SQL ops here)
+    v_frag      CLOB;              -- local LOB variable — never an array element
+    v_pos       PLS_INTEGER := 1;
+    v_end       PLS_INTEGER;
+    v_idx       PLS_INTEGER := 0;
+    v_dlen      PLS_INTEGER := LENGTH(DELIM);
+    v_input_len NUMBER;
+    v_frag_len  PLS_INTEGER;
   BEGIN
-    -- Append delimiter as CLOB character data (not RAW)
-    DBMS_LOB.CREATETEMPORARY(v_chunk, TRUE);
-    DBMS_LOB.APPEND(v_chunk, p_input);
-    DBMS_LOB.APPEND(v_chunk, TO_CLOB(DELIM));
-    v_total := DBMS_LOB.GETLENGTH(v_chunk);
-    dbg('split_queries: input=' || (v_total - v_dlen)
-        || ' chars, delim=[' || DELIM || '] len=' || v_dlen
-        || ', chunk_total=' || v_total || ' chars');
+    v_input_len := NVL(DBMS_LOB.GETLENGTH(p_input), 0);
+    dbg('split_queries: input_len=' || v_input_len
+        || ' chars, delim=[' || DELIM || '] len=' || v_dlen);
+
+    IF v_input_len > 32767 THEN
+      RAISE_APPLICATION_ERROR(-20015,
+        'PKG_XLSX_DIRECT.split_queries: combined query length (' || v_input_len
+        || ' chars) exceeds 32,767. Use PKG_XLSX_EXPORT.add_sheet for very long SQL.');
+    END IF;
+
+    -- Read into VARCHAR2 and append sentinel delimiter.
+    -- Standard INSTR/SUBSTR is used for splitting — avoids DBMS_LOB.INSTR
+    -- multi-byte charset issues (§ fails on WE8ISO8859P1 databases).
+    v_text := DBMS_LOB.SUBSTR(p_input, 32767, 1) || DELIM;
+    dbg('split_queries: varchar2_len=' || LENGTH(v_text) || ' (incl. sentinel delim)');
 
     LOOP
-      -- Search with VARCHAR2 pattern (correct overload for CLOB)
-      v_end := DBMS_LOB.INSTR(v_chunk, DELIM, v_pos);
+      v_end := INSTR(v_text, DELIM, v_pos);
       dbg('split_queries: scan from pos=' || v_pos
           || ' → delim_at=' || v_end
           || CASE WHEN v_end = 0 THEN ' (NOT FOUND — loop exits)' ELSE '' END);
-      EXIT WHEN v_end = 0 OR v_pos > v_total;
+      EXIT WHEN v_end = 0 OR v_pos > LENGTH(v_text);
 
       v_frag_len := v_end - v_pos;
       IF v_frag_len > 0 THEN
         v_idx := v_idx + 1;
-        DBMS_LOB.CREATETEMPORARY(v_result(v_idx), TRUE);
-        -- Use DBMS_LOB.COPY for safe extraction of any-length fragment
-        DBMS_LOB.COPY(v_result(v_idx), v_chunk, v_frag_len, 1, v_pos);
+        -- CREATETEMPORARY on local variable v_frag (not on v_result(v_idx)).
+        -- After WRITEAPPEND, the LOB locator is safely assigned to the array.
+        DBMS_LOB.CREATETEMPORARY(v_frag, TRUE);
+        DBMS_LOB.WRITEAPPEND(v_frag, v_frag_len,
+                             SUBSTR(v_text, v_pos, v_frag_len));
+        v_result(v_idx) := v_frag;   -- copy locator into array element
         dbg('split_queries: fragment[' || v_idx || '] extracted'
             || ' pos=' || v_pos || ' len=' || v_frag_len || ' chars'
-            || ' starts=[' || SUBSTR(DBMS_LOB.SUBSTR(v_result(v_idx), 40, 1), 1, 40) || ']');
+            || ' starts=[' || SUBSTR(v_text, v_pos, LEAST(40, v_frag_len)) || ']');
       ELSE
         dbg('split_queries: zero-length fragment at pos=' || v_pos || ' — skipped');
       END IF;
@@ -207,12 +231,12 @@ CREATE OR REPLACE PACKAGE BODY PKG_XLSX_DIRECT AS
       v_pos := v_end + v_dlen;
     END LOOP;
 
-    DBMS_LOB.FREETEMPORARY(v_chunk);
     dbg('split_queries: done — ' || v_idx || ' query/queries extracted');
     RETURN v_result;
   EXCEPTION
     WHEN OTHERS THEN
-      BEGIN DBMS_LOB.FREETEMPORARY(v_chunk); EXCEPTION WHEN OTHERS THEN NULL; END;
+      dbg('split_queries: FAILED at fragment[' || (v_idx + 1) || '] — ' || SQLERRM);
+      BEGIN DBMS_LOB.FREETEMPORARY(v_frag); EXCEPTION WHEN OTHERS THEN NULL; END;
       RAISE;
   END split_queries;
 
